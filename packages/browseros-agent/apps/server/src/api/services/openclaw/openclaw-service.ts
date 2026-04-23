@@ -40,7 +40,11 @@ import {
   getOpenClawStateEnvPath,
   mergeEnvContent,
 } from './openclaw-env'
-import { OpenClawHttpChatClient } from './openclaw-http-chat-client'
+import {
+  OpenClawHttpClient,
+  type OpenClawSessionHistory,
+  type OpenClawSessionHistoryEvent,
+} from './openclaw-http-client'
 import {
   type ResolvedOpenClawProviderConfig,
   resolveSupportedOpenClawProvider,
@@ -119,7 +123,7 @@ export class OpenClawService {
   private runtime: ContainerRuntime
   private cliClient: OpenClawCliClient
   private bootstrapCliClient: OpenClawCliClient
-  private chatClient: OpenClawHttpChatClient
+  private httpClient: OpenClawHttpClient
   private openclawDir: string
   private hostPort = OPENCLAW_GATEWAY_CONTAINER_PORT
   private token: string
@@ -139,7 +143,7 @@ export class OpenClawService {
     this.token = crypto.randomUUID()
     this.cliClient = new OpenClawCliClient(this.runtime)
     this.bootstrapCliClient = this.buildBootstrapCliClient()
-    this.chatClient = new OpenClawHttpChatClient(
+    this.httpClient = new OpenClawHttpClient(
       this.hostPort,
       async () => this.token,
     )
@@ -589,12 +593,34 @@ export class OpenClawService {
       historyLength: history.length,
     })
     return this.runControlPlaneCall(() =>
-      this.chatClient.streamChat({
+      this.httpClient.streamChat({
         agentId,
         sessionKey,
         message,
         history,
       }),
+    )
+  }
+
+  // ── Session History (HTTP) ───────────────────────────────────────────
+
+  async getSessionHistory(
+    sessionKey: string,
+    input: { limit?: number; cursor?: string; signal?: AbortSignal } = {},
+  ): Promise<OpenClawSessionHistory> {
+    await this.assertGatewayReady()
+    return this.runControlPlaneCall(() =>
+      this.httpClient.getSessionHistory(sessionKey, input),
+    )
+  }
+
+  async streamSessionHistory(
+    sessionKey: string,
+    input: { limit?: number; cursor?: string; signal?: AbortSignal } = {},
+  ): Promise<ReadableStream<OpenClawSessionHistoryEvent>> {
+    await this.assertGatewayReady()
+    return this.runControlPlaneCall(() =>
+      this.httpClient.streamSessionHistory(sessionKey, input),
     )
   }
 
@@ -745,7 +771,7 @@ export class OpenClawService {
   private setPort(hostPort: number): void {
     if (hostPort === this.hostPort) return
     this.hostPort = hostPort
-    this.chatClient = new OpenClawHttpChatClient(
+    this.httpClient = new OpenClawHttpClient(
       this.hostPort,
       async () => this.token,
     )

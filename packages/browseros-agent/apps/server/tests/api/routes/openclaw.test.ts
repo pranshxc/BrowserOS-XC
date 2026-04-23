@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, mock } from 'bun:test'
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { OpenClawSessionNotFoundError } from '../../../src/api/services/openclaw/errors'
 import { UnsupportedOpenClawProviderError } from '../../../src/api/services/openclaw/openclaw-provider-map'
 
 describe('createOpenClawRoutes', () => {
@@ -433,5 +434,125 @@ describe('createOpenClawRoutes', () => {
       apiKey: 'sk-test',
       modelId: 'gpt-5.4-mini',
     })
+  })
+
+  it('returns JSON history from the session history route and forwards query params', async () => {
+    const actualOpenClawService = await import(
+      '../../../src/api/services/openclaw/openclaw-service'
+    )
+    const getSessionHistory = mock(async () => ({
+      sessionKey: 'agent:main:main',
+      messages: [{ role: 'user', content: 'hi', messageSeq: 1 }],
+      cursor: null,
+      hasMore: false,
+    }))
+
+    mock.module('../../../src/api/services/openclaw/openclaw-service', () => ({
+      ...actualOpenClawService,
+      getOpenClawService: () => ({ getSessionHistory }) as never,
+    }))
+
+    const { createOpenClawRoutes } = await import(
+      '../../../src/api/routes/openclaw'
+    )
+    const route = createOpenClawRoutes()
+
+    const response = await route.request(
+      '/session/agent%3Amain%3Amain/history?limit=25&cursor=next',
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Content-Type')).toContain('application/json')
+    expect(getSessionHistory).toHaveBeenCalledWith('agent:main:main', {
+      limit: 25,
+      cursor: 'next',
+    })
+    expect(await response.json()).toEqual({
+      sessionKey: 'agent:main:main',
+      messages: [{ role: 'user', content: 'hi', messageSeq: 1 }],
+      cursor: null,
+      hasMore: false,
+    })
+  })
+
+  it('returns 404 when the service reports a missing session', async () => {
+    const actualOpenClawService = await import(
+      '../../../src/api/services/openclaw/openclaw-service'
+    )
+    const getSessionHistory = mock(async () => {
+      throw new OpenClawSessionNotFoundError('missing')
+    })
+
+    mock.module('../../../src/api/services/openclaw/openclaw-service', () => ({
+      ...actualOpenClawService,
+      getOpenClawService: () => ({ getSessionHistory }) as never,
+    }))
+
+    const { createOpenClawRoutes } = await import(
+      '../../../src/api/routes/openclaw'
+    )
+    const route = createOpenClawRoutes()
+
+    const response = await route.request('/session/missing/history')
+
+    expect(response.status).toBe(404)
+    expect(await response.json()).toEqual({
+      error: 'OpenClaw session not found: missing',
+    })
+  })
+
+  it('streams named SSE frames when Accept: text/event-stream', async () => {
+    const actualOpenClawService = await import(
+      '../../../src/api/services/openclaw/openclaw-service'
+    )
+    const streamSessionHistory = mock(
+      async () =>
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue({
+              type: 'history',
+              data: {
+                sessionKey: 'k',
+                messages: [],
+                cursor: null,
+                hasMore: false,
+              },
+            })
+            controller.enqueue({
+              type: 'message',
+              data: {
+                sessionKey: 'k',
+                messageSeq: 2,
+                message: { role: 'assistant', content: 'hi', messageSeq: 2 },
+              },
+            })
+            controller.close()
+          },
+        }),
+    )
+
+    mock.module('../../../src/api/services/openclaw/openclaw-service', () => ({
+      ...actualOpenClawService,
+      getOpenClawService: () => ({ streamSessionHistory }) as never,
+    }))
+
+    const { createOpenClawRoutes } = await import(
+      '../../../src/api/routes/openclaw'
+    )
+    const route = createOpenClawRoutes()
+
+    const response = await route.request('/session/k/history', {
+      headers: { Accept: 'text/event-stream' },
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Content-Type')).toContain('text/event-stream')
+    expect(response.headers.get('X-Session-Key')).toBe('k')
+    expect(streamSessionHistory).toHaveBeenCalledTimes(1)
+    expect(streamSessionHistory.mock.calls[0]?.[0]).toBe('k')
+    expect(await response.text()).toBe(
+      'event: history\ndata: {"sessionKey":"k","messages":[],"cursor":null,"hasMore":false}\n\n' +
+        'event: message\ndata: {"sessionKey":"k","messageSeq":2,"message":{"role":"assistant","content":"hi","messageSeq":2}}\n\n',
+    )
   })
 })

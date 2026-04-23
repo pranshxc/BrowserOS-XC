@@ -27,3 +27,10 @@ export class OpenClawProtectedAgentError extends Error {
     this.name = 'OpenClawProtectedAgentError'
   }
 }
+
+export class OpenClawSessionNotFoundError extends Error {
+  constructor(public readonly sessionKey: string) {
+    super(`OpenClaw session not found: ${sessionKey}`)
+    this.name = 'OpenClawSessionNotFoundError'
+  }
+}

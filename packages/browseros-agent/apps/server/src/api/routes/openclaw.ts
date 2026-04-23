@@ -19,6 +19,7 @@ import {
   OpenClawAgentNotFoundError,
   OpenClawInvalidAgentNameError,
   OpenClawProtectedAgentError,
+  OpenClawSessionNotFoundError,
 } from '../services/openclaw/errors'
 import { isUnsupportedOpenClawProviderError } from '../services/openclaw/openclaw-provider-map'
 import { getOpenClawService } from '../services/openclaw/openclaw-service'
@@ -338,6 +339,61 @@ export function createOpenClawRoutes() {
         })
         if (isUnsupportedOpenClawProviderError(err)) {
           return c.json({ error: err.message }, 400)
+        }
+        const message = err instanceof Error ? err.message : String(err)
+        return c.json({ error: message }, 500)
+      }
+    })
+
+    .get('/session/:key/history', async (c) => {
+      const key = c.req.param('key')
+      const limitRaw = c.req.query('limit')
+      const cursor = c.req.query('cursor')
+      const limitParsed =
+        limitRaw !== undefined ? Number.parseInt(limitRaw, 10) : Number.NaN
+      const limit = Number.isFinite(limitParsed) ? limitParsed : undefined
+      const wantsStream = (c.req.header('accept') ?? '').includes(
+        'text/event-stream',
+      )
+
+      try {
+        if (!wantsStream) {
+          const history = await getOpenClawService().getSessionHistory(key, {
+            limit,
+            cursor,
+          })
+          return c.json(history)
+        }
+
+        const eventStream = await getOpenClawService().streamSessionHistory(
+          key,
+          { limit, cursor, signal: c.req.raw.signal },
+        )
+
+        c.header('Content-Type', 'text/event-stream')
+        c.header('Cache-Control', 'no-cache')
+        c.header('X-Session-Key', key)
+
+        return stream(c, async (s) => {
+          const reader = eventStream.getReader()
+          const encoder = new TextEncoder()
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              await s.write(
+                encoder.encode(
+                  `event: ${value.type}\ndata: ${JSON.stringify(value.data)}\n\n`,
+                ),
+              )
+            }
+          } finally {
+            await reader.cancel()
+          }
+        })
+      } catch (err) {
+        if (err instanceof OpenClawSessionNotFoundError) {
+          return c.json({ error: err.message }, 404)
         }
         const message = err instanceof Error ? err.message : String(err)
         return c.json({ error: message }, 500)
