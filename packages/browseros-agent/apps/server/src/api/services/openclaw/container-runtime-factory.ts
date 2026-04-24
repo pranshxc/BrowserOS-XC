@@ -175,6 +175,10 @@ class UnsupportedPlatformTestRuntime extends ContainerRuntime {
     throw unsupportedPlatformError()
   }
 
+  override async runInContainer(): Promise<never> {
+    throw unsupportedPlatformError()
+  }
+
   override async runGatewaySetupCommand(): Promise<number> {
     throw unsupportedPlatformError()
   }
