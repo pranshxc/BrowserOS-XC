@@ -27,11 +27,14 @@ export class AgentHarnessService {
       agentStore?: FileAgentStore
       transcriptStore?: FileTranscriptStore
       runtime?: AgentRuntime
+      browserosServerPort?: number
     } = {},
   ) {
     this.agentStore = deps.agentStore ?? new FileAgentStore()
     this.transcriptStore = deps.transcriptStore ?? new FileTranscriptStore()
-    this.runtime = deps.runtime ?? new AcpxRuntime()
+    this.runtime =
+      deps.runtime ??
+      new AcpxRuntime({ browserosServerPort: deps.browserosServerPort })
   }
 
   listAgents(): Promise<AgentDefinition[]> {

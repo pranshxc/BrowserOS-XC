@@ -44,10 +44,13 @@ type AgentRouteService = {
 
 type AgentRouteDeps = {
   service?: AgentRouteService
+  browserosServerPort?: number
 }
 
 export function createAgentRoutes(deps: AgentRouteDeps = {}) {
-  const service = deps.service ?? new AgentHarnessService()
+  const service =
+    deps.service ??
+    new AgentHarnessService({ browserosServerPort: deps.browserosServerPort })
 
   return new Hono<Env>()
     .get('/adapters', (c) => c.json({ adapters: AGENT_ADAPTER_CATALOG }))

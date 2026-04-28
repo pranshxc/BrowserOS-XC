@@ -5,6 +5,7 @@
  */
 
 import { join } from 'node:path'
+import { DEFAULT_PORTS } from '@browseros/shared/constants/ports'
 import {
   type AcpRuntimeEvent,
   type AcpRuntimeHandle,
@@ -30,12 +31,20 @@ import type {
 type AcpxRuntimeOptions = {
   cwd?: string
   stateDir?: string
+  browserosServerPort?: number
   runtimeFactory?: (options: AcpRuntimeOptions) => AcpxCoreRuntime
 }
+
+const BROWSEROS_ACP_AGENT_INSTRUCTIONS = `<role>
+You are BrowserOS - a browser agent with full control of a Chromium browser through the BrowserOS MCP server.
+
+Use the BrowserOS MCP server for all browser tasks, including browsing the web, interacting with pages, inspecting browser state, and managing tabs, windows, bookmarks, and history.
+</role>`
 
 export class AcpxRuntime implements AgentRuntime {
   private readonly cwd: string
   private readonly stateDir: string
+  private readonly browserosServerPort: number
   private readonly runtimeFactory: (
     options: AcpRuntimeOptions,
   ) => AcpxCoreRuntime
@@ -47,6 +56,8 @@ export class AcpxRuntime implements AgentRuntime {
       options.stateDir ??
       process.env.BROWSEROS_ACPX_STATE_DIR ??
       join(getBrowserosDir(), 'agents', 'acpx')
+    this.browserosServerPort =
+      options.browserosServerPort ?? DEFAULT_PORTS.server
     this.runtimeFactory = options.runtimeFactory ?? createAcpRuntime
   }
 
@@ -103,7 +114,8 @@ export class AcpxRuntime implements AgentRuntime {
     const runtime = this.runtimeFactory({
       cwd: input.cwd,
       sessionStore: createRuntimeStore({ stateDir: this.stateDir }),
-      agentRegistry: createAgentRegistry(),
+      agentRegistry: createBrowserosAgentRegistry(input.permissionMode),
+      mcpServers: createBrowserosMcpServers(this.browserosServerPort),
       permissionMode: input.permissionMode,
       nonInteractivePermissions: input.nonInteractivePermissions,
     })
@@ -113,6 +125,7 @@ export class AcpxRuntime implements AgentRuntime {
       stateDir: this.stateDir,
       permissionMode: input.permissionMode,
       nonInteractivePermissions: input.nonInteractivePermissions,
+      browserosServerPort: this.browserosServerPort,
     })
     return runtime
   }
@@ -154,7 +167,7 @@ function createAcpxEventStream(
 
         const turn = runtime.startTurn({
           handle,
-          text: input.message,
+          text: buildBrowserosAcpPrompt(input.message),
           mode: 'prompt',
           requestId: crypto.randomUUID(),
           timeoutMs: input.timeoutMs,
@@ -193,12 +206,73 @@ function createAcpxEventStream(
   })
 }
 
+function createBrowserosMcpServers(
+  browserosServerPort: number,
+): NonNullable<AcpRuntimeOptions['mcpServers']> {
+  return [
+    {
+      type: 'http',
+      name: 'browseros',
+      url: `http://127.0.0.1:${browserosServerPort}/mcp`,
+      headers: [],
+    },
+  ]
+}
+
+function createBrowserosAgentRegistry(
+  permissionMode: AcpRuntimeOptions['permissionMode'],
+): AcpRuntimeOptions['agentRegistry'] {
+  const registry = createAgentRegistry()
+  if (permissionMode !== 'approve-all') return registry
+
+  return {
+    list() {
+      return registry.list()
+    },
+    resolve(agentName) {
+      const command = registry.resolve(agentName)
+      switch (agentName.trim().toLowerCase()) {
+        case 'claude':
+          return appendCommandArg(command, '--dangerously-skip-permissions')
+        case 'codex':
+          return appendCommandArg(
+            command,
+            '--dangerously-bypass-approvals-and-sandbox',
+          )
+        default:
+          return command
+      }
+    },
+  }
+}
+
+function appendCommandArg(command: string, arg: string): string {
+  return command.split(/\s+/).includes(arg) ? command : `${command} ${arg}`
+}
+
+function buildBrowserosAcpPrompt(message: string): string {
+  return `${BROWSEROS_ACP_AGENT_INSTRUCTIONS}
+
+<user_request>
+${escapePromptTagText(message)}
+</user_request>`
+}
+
+function escapePromptTagText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
 async function applyRuntimeControls(
   runtime: AcpxCoreRuntime,
   handle: AcpRuntimeHandle,
   input: AgentPromptInput,
 ): Promise<AgentStreamEvent[]> {
   const events: AgentStreamEvent[] = []
+  events.push(...(await applyPermissionBypass(runtime, handle, input)))
+
   if (input.agent.modelId && input.agent.modelId !== 'default') {
     events.push({
       type: 'status',
@@ -246,6 +320,55 @@ async function applyRuntimeControls(
     })
   }
   return events
+}
+
+async function applyPermissionBypass(
+  runtime: AcpxCoreRuntime,
+  handle: AcpRuntimeHandle,
+  input: AgentPromptInput,
+): Promise<AgentStreamEvent[]> {
+  if (
+    input.permissionMode !== 'approve-all' ||
+    input.agent.adapter !== 'claude'
+  ) {
+    return []
+  }
+
+  if (!runtime.setMode) {
+    return [
+      {
+        type: 'status',
+        text: 'Requested Claude bypassPermissions mode, but this acpx/runtime version does not expose mode control.',
+      },
+    ]
+  }
+
+  try {
+    await runtime.setMode({ handle, mode: 'bypassPermissions' })
+    logger.debug('Agent harness acpx mode applied', {
+      agentId: input.agent.id,
+      adapter: input.agent.adapter,
+      sessionKey: input.sessionKey,
+      mode: 'bypassPermissions',
+    })
+  } catch (err) {
+    logger.warn('Agent harness acpx mode unavailable', {
+      agentId: input.agent.id,
+      adapter: input.agent.adapter,
+      sessionKey: input.sessionKey,
+      mode: 'bypassPermissions',
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return [
+      {
+        type: 'status',
+        text: `Could not apply Claude bypassPermissions mode; continuing with the adapter default. ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      },
+    ]
+  }
+  return []
 }
 
 function mapRuntimeEvent(event: AcpRuntimeEvent): AgentStreamEvent {
