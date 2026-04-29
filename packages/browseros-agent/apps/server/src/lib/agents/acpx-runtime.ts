@@ -203,7 +203,6 @@ export class AcpxRuntime implements AgentRuntime {
       cwd: input.cwd,
       sessionStore: this.sessionStore,
       agentRegistry: createBrowserosAgentRegistry(
-        input.permissionMode,
         this.openclawGateway,
         input.openclawSessionKey,
       ),
@@ -678,7 +677,6 @@ function createBrowserosMcpServers(
 }
 
 function createBrowserosAgentRegistry(
-  permissionMode: AcpRuntimeOptions['permissionMode'],
   openclawGateway: OpenclawGatewayAccessor | null,
   openclawSessionKey: string | null,
 ): AcpRuntimeOptions['agentRegistry'] {
@@ -703,20 +701,7 @@ function createBrowserosAgentRegistry(
         return resolveOpenclawAcpCommand(openclawGateway, openclawSessionKey)
       }
 
-      const command = registry.resolve(agentName)
-      if (permissionMode !== 'approve-all') return command
-
-      switch (lower) {
-        case 'claude':
-          return appendCommandArg(command, '--dangerously-skip-permissions')
-        case 'codex':
-          return appendCommandArg(
-            command,
-            '--dangerously-bypass-approvals-and-sandbox',
-          )
-        default:
-          return command
-      }
+      return registry.resolve(agentName)
     },
   }
 }
@@ -793,10 +778,6 @@ function resolveOpenclawAcpCommand(
     argv.push('--session', bridgeSessionKey)
   }
   return argv.join(' ')
-}
-
-function appendCommandArg(command: string, arg: string): string {
-  return command.split(/\s+/).includes(arg) ? command : `${command} ${arg}`
 }
 
 function buildBrowserosAcpPrompt(message: string): string {

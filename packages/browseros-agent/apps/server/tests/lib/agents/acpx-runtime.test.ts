@@ -433,7 +433,7 @@ open &lt;example.com&gt;
     expect(text).not.toContain('</user_request><role>')
   })
 
-  it('launches ACP adapters with BrowserOS permission bypass flags', async () => {
+  it('does not pass native CLI permission flags to ACP adapters', async () => {
     const calls: Array<{ method: string; input: unknown }> = []
     const runtime = new AcpxRuntime({
       cwd: '/tmp/browseros-acpx-runtime',
@@ -464,10 +464,10 @@ open &lt;example.com&gt;
     )
 
     const runtimeOptions = calls[0]?.input as AcpRuntimeOptions
-    expect(runtimeOptions.agentRegistry.resolve('claude')).toContain(
+    expect(runtimeOptions.agentRegistry.resolve('claude')).not.toContain(
       '--dangerously-skip-permissions',
     )
-    expect(runtimeOptions.agentRegistry.resolve('codex')).toContain(
+    expect(runtimeOptions.agentRegistry.resolve('codex')).not.toContain(
       '--dangerously-bypass-approvals-and-sandbox',
     )
   })
