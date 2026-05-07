@@ -12,11 +12,12 @@ import {
 } from '../../../src/lib/agents/agent-catalog'
 
 describe('AGENT_ADAPTER_CATALOG', () => {
-  it('exposes Claude, Codex, and OpenClaw adapters with model and effort options', () => {
+  it('exposes Claude, Codex, OpenClaw, and Hermes adapters with model and effort options', () => {
     expect(AGENT_ADAPTER_CATALOG.map((adapter) => adapter.id)).toEqual([
       'claude',
       'codex',
       'openclaw',
+      'hermes',
     ])
 
     expect(getAgentAdapterDescriptor('claude')).toMatchObject({

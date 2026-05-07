@@ -6,6 +6,7 @@
 
 import {
   AcpxRuntime,
+  type HermesGatewayAccessor,
   type OpenclawGatewayAccessor,
 } from '../../../lib/agents/acpx-runtime'
 import {
@@ -24,6 +25,8 @@ import {
   type QueuedMessage,
   type QueuedMessageAttachment,
 } from '../../../lib/agents/message-queue'
+import { writeHermesPerAgentProvider } from '../hermes/hermes-paths'
+import { getHermesProviderMapping } from '../hermes/hermes-provider-map'
 
 export {
   MessageQueueFullError,
@@ -201,6 +204,12 @@ export class AgentHarnessService {
   private readonly messageQueue: FileMessageQueue
   private readonly turnLifecycleListeners = new Set<TurnLifecycleListener>()
   /**
+   * Optional override for the BrowserOS dir used by Hermes per-agent
+   * provider config writes. Defaults to the global `getBrowserosDir()`
+   * lookup at write time when undefined; tests can inject a tmp dir.
+   */
+  private readonly browserosDir: string | undefined
+  /**
    * Lazy-initialised so tests that swap in a fake `agentStore` don't
    * eagerly hit `getDb()` (which throws when the test harness hasn't
    * called `initializeDb`). Tests that exercise file attribution can
@@ -223,8 +232,10 @@ export class AgentHarnessService {
       agentStore?: AgentStore
       runtime?: AgentRuntime
       browserosServerPort?: number
+      browserosDir?: string
       openclawGateway?: OpenclawGatewayAccessor
       openclawProvisioner?: OpenClawProvisioner
+      hermesGateway?: HermesGatewayAccessor
       turnRegistry?: TurnRegistry
       messageQueue?: FileMessageQueue
       producedFilesStore?: ProducedFilesStore
@@ -236,10 +247,12 @@ export class AgentHarnessService {
       new AcpxRuntime({
         browserosServerPort: deps.browserosServerPort,
         openclawGateway: deps.openclawGateway,
+        hermesGateway: deps.hermesGateway,
       })
     this.openclawProvisioner = deps.openclawProvisioner ?? null
     this.turnRegistry = deps.turnRegistry ?? new TurnRegistry()
     this.messageQueue = deps.messageQueue ?? new FileMessageQueue()
+    this.browserosDir = deps.browserosDir
     if (deps.producedFilesStore) {
       this.explicitProducedFilesStore = deps.producedFilesStore
     }
@@ -533,7 +546,23 @@ export class AgentHarnessService {
   }
 
   async createAgent(input: CreateAgentInput): Promise<AgentDefinition> {
+    if (input.adapter === 'hermes') {
+      // Validate before touching the store so we don't leave an orphan
+      // record on the unhappy path.
+      assertHermesProviderInputValid(input)
+    }
+
     const agent = await this.agentStore.create(input)
+
+    if (agent.adapter === 'hermes') {
+      try {
+        await this.writeHermesPerAgentProvider(agent.id, input)
+      } catch (err) {
+        await this.agentStore.delete(agent.id).catch(() => {})
+        throw err
+      }
+      return agent
+    }
 
     if (agent.adapter !== 'openclaw') {
       return agent
@@ -573,6 +602,35 @@ export class AgentHarnessService {
       })
       throw err
     }
+  }
+
+  /**
+   * Write Hermes' per-agent config.yaml + .env into the on-host home
+   * dir. Caller must have already run assertHermesProviderInputValid;
+   * any throw here is a real I/O failure and must roll back the agent
+   * record.
+   */
+  private async writeHermesPerAgentProvider(
+    agentId: string,
+    input: CreateAgentInput,
+  ): Promise<void> {
+    // Non-null assertions are safe: assertHermesProviderInputValid ran
+    // first and rejects when any required field is missing.
+    const mapping = getHermesProviderMapping(input.providerType as string)
+    if (!mapping) {
+      throw new HermesProviderConfigInvalidError(
+        `Provider type "${input.providerType}" is not supported by Hermes`,
+      )
+    }
+    await writeHermesPerAgentProvider({
+      browserosDir: this.browserosDir,
+      agentId,
+      providerId: mapping.hermesProvider,
+      envVarName: mapping.envVarName,
+      apiKey: (input.apiKey as string).trim(),
+      modelId: (input.modelId as string).trim(),
+      baseUrl: input.baseUrl?.trim() || undefined,
+    })
   }
 
   /**
@@ -1184,6 +1242,48 @@ export class InvalidAgentUpdateError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'InvalidAgentUpdateError'
+  }
+}
+
+/**
+ * Thrown when a Hermes adapter agent is created without a complete
+ * provider config (provider type, API key, model id; base URL when the
+ * provider mapping requires it). Surfaces as a 400 in the route layer.
+ */
+export class HermesProviderConfigInvalidError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'HermesProviderConfigInvalidError'
+  }
+}
+
+function assertHermesProviderInputValid(input: CreateAgentInput): void {
+  const providerType = input.providerType?.trim()
+  if (!providerType) {
+    throw new HermesProviderConfigInvalidError(
+      'Hermes agent requires providerType (pick a provider configured in BrowserOS AI Settings)',
+    )
+  }
+  const mapping = getHermesProviderMapping(providerType)
+  if (!mapping) {
+    throw new HermesProviderConfigInvalidError(
+      `Provider type "${providerType}" is not supported by Hermes`,
+    )
+  }
+  if (!input.apiKey?.trim()) {
+    throw new HermesProviderConfigInvalidError(
+      'Hermes agent requires apiKey from the selected provider',
+    )
+  }
+  if (!input.modelId?.trim()) {
+    throw new HermesProviderConfigInvalidError(
+      'Hermes agent requires modelId from the selected provider',
+    )
+  }
+  if (mapping.requiresBaseUrl && !input.baseUrl?.trim()) {
+    throw new HermesProviderConfigInvalidError(
+      `Provider type "${providerType}" requires baseUrl`,
+    )
   }
 }
 

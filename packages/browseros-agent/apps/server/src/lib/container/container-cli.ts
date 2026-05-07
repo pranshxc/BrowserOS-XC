@@ -235,6 +235,7 @@ function buildCreateArgs(spec: ContainerSpec): string[] {
       args.push('--health-retries', String(spec.health.retries))
     }
   }
+  if (spec.entrypoint) args.push('--entrypoint', spec.entrypoint)
 
   args.push(spec.image)
   args.push(...(spec.command ?? []))

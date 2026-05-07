@@ -40,6 +40,8 @@ interface NewAgentDialogProps {
   harnessAdapterId: HarnessAgentAdapter
   harnessModelId: string
   harnessReasoningEffort: string
+  hermesProviders: ProviderOption[]
+  hermesSelectedProviderId: string
   name: string
   open: boolean
   providers: ProviderOption[]
@@ -55,6 +57,7 @@ interface NewAgentDialogProps {
   onHarnessAdapterChange: (adapter: HarnessAgentAdapter) => void
   onHarnessModelChange: (modelId: string) => void
   onHarnessReasoningChange: (reasoningEffort: string) => void
+  onHermesProviderChange: (providerId: string) => void
   onNameChange: (name: string) => void
   onProviderChange: (providerId: string) => void
 }
@@ -69,6 +72,8 @@ export const NewAgentDialog: FC<NewAgentDialogProps> = ({
   harnessAdapterId,
   harnessModelId,
   harnessReasoningEffort,
+  hermesProviders,
+  hermesSelectedProviderId,
   name,
   open,
   providers,
@@ -84,22 +89,29 @@ export const NewAgentDialog: FC<NewAgentDialogProps> = ({
   onHarnessAdapterChange,
   onHarnessModelChange,
   onHarnessReasoningChange,
+  onHermesProviderChange,
   onNameChange,
   onProviderChange,
 }) => {
   const selectedHarnessAdapter =
     adapters.find((adapter) => adapter.id === harnessAdapterId) ?? adapters[0]
   const isHarnessRuntime = createRuntime !== 'openclaw'
+  const isHermesRuntime = createRuntime === 'hermes'
+  const isClassicHarnessRuntime = isHarnessRuntime && !isHermesRuntime
   const openClawBlocked = createRuntime === 'openclaw' && !canManageOpenClaw
   const cliBlocked =
     createRuntime === 'openclaw' &&
     !!selectedCliProvider &&
     !cliAuthStatus?.loggedIn
+  const hermesBlocked =
+    isHermesRuntime &&
+    (hermesProviders.length === 0 || !hermesSelectedProviderId)
   const canCreate =
     Boolean(name.trim()) &&
     !creating &&
     !openClawBlocked &&
     !cliBlocked &&
+    !hermesBlocked &&
     (createRuntime === 'openclaw'
       ? providers.length > 0
       : Boolean(selectedHarnessAdapter))
@@ -143,7 +155,8 @@ export const NewAgentDialog: FC<NewAgentDialogProps> = ({
                 if (
                   value === 'openclaw' ||
                   value === 'claude' ||
-                  value === 'codex'
+                  value === 'codex' ||
+                  value === 'hermes'
                 ) {
                   onRuntimeChange(value)
                   if (value !== 'openclaw') onHarnessAdapterChange(value)
@@ -196,7 +209,16 @@ export const NewAgentDialog: FC<NewAgentDialogProps> = ({
             </>
           ) : null}
 
-          {isHarnessRuntime ? (
+          {isHermesRuntime ? (
+            <ProviderSelector
+              providers={hermesProviders}
+              defaultProviderId={defaultProviderId}
+              selectedId={hermesSelectedProviderId}
+              onSelect={onHermesProviderChange}
+            />
+          ) : null}
+
+          {isClassicHarnessRuntime ? (
             <>
               <div className="grid gap-2">
                 <Label htmlFor="harness-model">Model</Label>

@@ -1,6 +1,6 @@
 import type { AgentEntry } from './useOpenClaw'
 
-export type HarnessAgentAdapter = 'claude' | 'codex' | 'openclaw'
+export type HarnessAgentAdapter = 'claude' | 'codex' | 'openclaw' | 'hermes'
 
 /**
  * One file the harness attributed to the assistant turn that just
@@ -130,6 +130,17 @@ export interface CreateHarnessAgentInput {
   adapter: HarnessAgentAdapter
   modelId?: string
   reasoningEffort?: string
+  /**
+   * Hermes-only — provider id from `HERMES_SUPPORTED_PROVIDERS`. When
+   * paired with `apiKey`, the backend writes a per-agent
+   * config.yaml + .env into the agent's HERMES_HOME so the first chat
+   * doesn't depend on the user having run `hermes setup` globally.
+   */
+  providerType?: string
+  /** Hermes-only — API key paired with `providerType`. */
+  apiKey?: string
+  /** Hermes-only — base URL for the `custom` provider. */
+  baseUrl?: string
 }
 
 export interface HarnessHistoryReasoning {

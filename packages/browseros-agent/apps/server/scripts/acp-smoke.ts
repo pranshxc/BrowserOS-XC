@@ -503,7 +503,7 @@ async function scenarioConfig(): Promise<void> {
     await tearDown(s)
     return
   }
-  const newValue = target.options![0].value
+  const newValue = target.options?.[0].value
   console.log(`[config] setting configId=${target.id} value=${newValue}`)
   try {
     // @ts-expect-error - input shape varies

@@ -37,6 +37,10 @@
       "types": "./src/constants/openclaw.ts",
       "default": "./src/constants/openclaw.ts"
     },
+    "./constants/hermes": {
+      "types": "./src/constants/hermes.ts",
+      "default": "./src/constants/hermes.ts"
+    },
     "./constants/tool-approval": {
       "types": "./src/constants/tool-approval.ts",
       "default": "./src/constants/tool-approval.ts"

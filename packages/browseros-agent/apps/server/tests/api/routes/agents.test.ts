@@ -696,7 +696,7 @@ function createFakeService(agents: AgentDefinition[]) {
     },
     async createAgent(input: {
       name: string
-      adapter: 'claude' | 'codex' | 'openclaw'
+      adapter: 'claude' | 'codex' | 'openclaw' | 'hermes'
       modelId?: string
       reasoningEffort?: string
     }) {

@@ -35,6 +35,14 @@ export interface ContainerSpec {
   mounts?: MountSpec[]
   addHosts?: string[]
   health?: HealthConfig
+  /**
+   * Override the image's ENTRYPOINT. When set, nerdctl is invoked with
+   * `--entrypoint <value>`; the `command` array is appended as args to
+   * this entrypoint. Useful for keeping a service-style image alive in
+   * the background (e.g. `tini -- sh -c "exec sleep infinity"`) so that
+   * other code paths can `nerdctl exec` into it per turn.
+   */
+  entrypoint?: string
   command?: string[]
 }
 

@@ -14,7 +14,10 @@ import { stream } from 'hono/streaming'
 import { formatUserMessage } from '../../agent/format-message'
 import type { Browser } from '../../browser/browser'
 import { createAcpUIMessageStreamResponse } from '../../lib/agents/acp-ui-message-stream'
-import type { OpenclawGatewayAccessor } from '../../lib/agents/acpx-runtime'
+import type {
+  HermesGatewayAccessor,
+  OpenclawGatewayAccessor,
+} from '../../lib/agents/acpx-runtime'
 import type {
   ActiveTurnInfo,
   TurnFrame,
@@ -35,6 +38,7 @@ import {
   type AgentDefinitionWithActivity,
   AgentHarnessService,
   type GatewayStatusSnapshot,
+  HermesProviderConfigInvalidError,
   InvalidAgentUpdateError,
   MessageQueueFullError,
   type OpenClawProvisioner,
@@ -132,6 +136,13 @@ type AgentRouteDeps = {
    * gateway side. Without this, openclaw create requests fail with 503.
    */
   openclawProvisioner?: OpenClawProvisioner
+  /**
+   * Required when a `hermes` adapter agent is in use; harmless when
+   * absent (the AcpxRuntime falls back to a host-process spawn for
+   * tests / dev). Forwarded to the AcpxRuntime so it can spawn
+   * `hermes acp` inside the Hermes container.
+   */
+  hermesGateway?: HermesGatewayAccessor
   /** Optional override; defaults to a fresh in-memory checker. */
   adapterHealth?: AdapterHealthChecker
   /**
@@ -160,6 +171,7 @@ export function createAgentRoutes(deps: AgentRouteDeps = {}) {
       browserosServerPort: deps.browserosServerPort,
       openclawGateway: deps.openclawGateway,
       openclawProvisioner: deps.openclawProvisioner,
+      hermesGateway: deps.hermesGateway,
     })
   if (deps.onTurnLifecycle && service instanceof AgentHarnessService) {
     service.onTurnLifecycle(deps.onTurnLifecycle)
@@ -674,11 +686,14 @@ async function parseCreateAgentBody(c: Context<Env>): Promise<
       ? record.reasoningEffort.trim()
       : undefined
 
-  // OpenClaw agents resolve their model from the gateway-side provider
-  // config rather than from the harness catalog. Skip catalog model
-  // validation for that adapter; everything else still uses the catalog.
+  // OpenClaw and Hermes resolve their model from per-agent provider
+  // config (gateway / config.yaml) rather than from the harness catalog.
+  // Skip catalog model validation for those adapters — both have an
+  // empty `models: []` in the catalog by design — everything else still
+  // uses the catalog for validation.
   if (
     record.adapter !== 'openclaw' &&
+    record.adapter !== 'hermes' &&
     !isSupportedAgentModel(record.adapter, modelId)
   ) {
     return { error: 'Invalid modelId' }
@@ -913,6 +928,9 @@ function handleAgentRouteError(c: Context<Env>, err: unknown) {
     return c.json({ error: err.message }, 404)
   }
   if (err instanceof InvalidAgentUpdateError) {
+    return c.json({ error: err.message }, 400)
+  }
+  if (err instanceof HermesProviderConfigInvalidError) {
     return c.json({ error: err.message }, 400)
   }
   if (err instanceof MessageQueueFullError) {

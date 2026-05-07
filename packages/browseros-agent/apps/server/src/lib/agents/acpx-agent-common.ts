@@ -57,6 +57,7 @@ export async function finishBrowserosManagedContext(input: {
   skillNames: string[]
   promptPrefix: string
   commandEnv: Record<string, string>
+  browserosMcpHost?: string
 }): Promise<PreparedAcpxAgentContext> {
   const commandIdentity = stableCommandIdentity(input.commandEnv)
   const runtimeSessionKey = deriveRuntimeSessionKey({
@@ -83,6 +84,7 @@ export async function finishBrowserosManagedContext(input: {
     commandEnv: input.commandEnv,
     commandIdentity,
     useBrowserosMcp: true,
+    browserosMcpHost: input.browserosMcpHost,
     openclawSessionKey: null,
   }
 }

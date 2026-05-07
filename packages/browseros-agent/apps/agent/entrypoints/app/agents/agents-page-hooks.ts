@@ -4,8 +4,9 @@ import type {
   HarnessAdapterDescriptor,
   HarnessAgentAdapter,
 } from './agent-harness-types'
-import type { CreateAgentRuntime } from './agents-page-types'
+import type { CreateAgentRuntime, ProviderOption } from './agents-page-types'
 import { toProviderOptions } from './agents-page-utils'
+import { getHermesSupportedProviders } from './hermes-supported-providers'
 import {
   buildOpenClawCliProviderOptions,
   findOpenClawCliProviderById,
@@ -170,4 +171,61 @@ export function useOpenClawProviderSelection(input: {
     cliAuthLoading,
     cliAuthError,
   }
+}
+
+/**
+ * Mirror of useOpenClawProviderSelection but for Hermes. Hermes only
+ * needs the create-dialog flow (no setup dialog, no CLI providers), so
+ * this hook is much smaller — it just filters the global provider list
+ * to ones Hermes can drive and seeds the selected id when the dialog
+ * opens.
+ */
+export function useHermesProviderSelection(input: {
+  providers: LlmProviderConfig[]
+  defaultProviderId: string
+  createOpen: boolean
+  createRuntime: CreateAgentRuntime
+  createHermesProviderId: string
+  setCreateHermesProviderId: Dispatch<SetStateAction<string>>
+}) {
+  const {
+    providers,
+    defaultProviderId,
+    createOpen,
+    createRuntime,
+    createHermesProviderId,
+    setCreateHermesProviderId,
+  } = input
+
+  const selectableHermesProviders = useMemo<ProviderOption[]>(
+    () =>
+      getHermesSupportedProviders(providers).map((provider) => ({
+        id: provider.id,
+        type: provider.type,
+        name: provider.name,
+        modelId: provider.modelId,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+      })),
+    [providers],
+  )
+
+  useEffect(() => {
+    if (selectableHermesProviders.length === 0) return
+    if (!createOpen || createRuntime !== 'hermes') return
+    if (createHermesProviderId) return
+    const fallbackId =
+      selectableHermesProviders.find((p) => p.id === defaultProviderId)?.id ??
+      selectableHermesProviders[0].id
+    setCreateHermesProviderId(fallbackId)
+  }, [
+    createHermesProviderId,
+    createOpen,
+    createRuntime,
+    defaultProviderId,
+    selectableHermesProviders,
+    setCreateHermesProviderId,
+  ])
+
+  return { selectableHermesProviders }
 }

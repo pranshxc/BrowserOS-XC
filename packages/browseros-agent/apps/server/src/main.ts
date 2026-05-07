@@ -13,6 +13,10 @@ import path from 'node:path'
 import { EXIT_CODES } from '@browseros/shared/constants/exit-codes'
 import { createHttpServer } from './api/server'
 import {
+  configureHermesContainerService,
+  getHermesContainerService,
+} from './api/services/hermes/hermes-container'
+import {
   configureOpenClawService,
   configureVmRuntime,
   getOpenClawService,
@@ -150,6 +154,33 @@ export class Application {
       })
     }
 
+    // Hermes container is also best-effort — same crash isolation
+    // semantics as OpenClaw above. Image is pulled in the background;
+    // an idle container is brought up so per-turn `nerdctl exec hermes acp`
+    // calls from the harness don't pay container-create latency.
+    try {
+      const hermesService = configureHermesContainerService({
+        resourcesDir,
+      })
+      void hermesService.prewarm().catch((err) =>
+        logger.warn('Hermes prewarm failed', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      )
+      void hermesService.start().catch((err) =>
+        logger.warn('Hermes container start failed', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      )
+    } catch (err) {
+      logger.warn(
+        'Hermes container configuration failed, continuing without it',
+        {
+          error: err instanceof Error ? err.message : String(err),
+        },
+      )
+    }
+
     metrics.log('http_server.started', { version: VERSION })
   }
 
@@ -157,6 +188,9 @@ export class Application {
     logger.info('Shutting down server...', { reason })
     stopSkillSync()
     getOpenClawService()
+      .shutdown()
+      .catch(() => {})
+    getHermesContainerService()
       .shutdown()
       .catch(() => {})
     removeServerConfigSync()

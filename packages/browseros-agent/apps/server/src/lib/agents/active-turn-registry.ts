@@ -91,7 +91,7 @@ export class RingBuffer {
   /** Frames with seq > fromSeq, plus the terminal frame if not already in the slice. */
   slice(fromSeq: number): TurnFrame[] {
     const live = this.frames.filter((f) => f.seq > fromSeq)
-    if (this.terminal && !live.some((f) => f.seq === this.terminal!.seq)) {
+    if (this.terminal && !live.some((f) => f.seq === this.terminal?.seq)) {
       // Terminal might have been evicted by overflow; re-attach it so
       // subscribers always see a terminal if one exists.
       if (this.terminal.seq > fromSeq) live.push(this.terminal)

@@ -10,6 +10,7 @@ import { createAgentPageActions } from './agents-page-actions'
 import {
   useDefaultAgentName,
   useHarnessAgentDefaults,
+  useHermesProviderSelection,
   useOpenClawProviderSelection,
 } from './agents-page-hooks'
 import {
@@ -106,6 +107,7 @@ export const AgentsPage: FC = () => {
   )
   const [harnessModelId, setHarnessModelId] = useState('')
   const [harnessReasoningEffort, setHarnessReasoningEffort] = useState('')
+  const [createHermesProviderId, setCreateHermesProviderId] = useState('')
   const [showTerminal, setShowTerminal] = useState(false)
   const [cliAuthModalOpen, setCliAuthModalOpen] = useState(false)
   const [pageError, setPageError] = useState<string | null>(null)
@@ -132,6 +134,14 @@ export const AgentsPage: FC = () => {
     setSetupProviderId,
     cliAuthModalOpen,
     setCliAuthModalOpen,
+  })
+  const { selectableHermesProviders } = useHermesProviderSelection({
+    providers,
+    defaultProviderId,
+    createOpen,
+    createRuntime,
+    createHermesProviderId,
+    setCreateHermesProviderId,
   })
   useDefaultAgentName(createOpen, setNewName)
   useHarnessAgentDefaults({
@@ -226,11 +236,13 @@ export const AgentsPage: FC = () => {
     createAgentPageActions({
       createProviderId,
       createRuntime,
+      createHermesProviderId,
       harnessModelId,
       harnessReasoningEffort,
       navigate,
       newName,
       selectableOpenClawProviders,
+      selectableHermesProviders,
       setupProviderId,
       createHarnessAgent: createHarnessAgent.mutateAsync,
       createOpenClawAgent,
@@ -386,6 +398,8 @@ export const AgentsPage: FC = () => {
           harnessAdapterId={harnessAdapterId}
           harnessModelId={harnessModelId}
           harnessReasoningEffort={harnessReasoningEffort}
+          hermesProviders={selectableHermesProviders}
+          hermesSelectedProviderId={createHermesProviderId}
           name={newName}
           open={createOpen}
           providers={selectableOpenClawProviders}
@@ -401,12 +415,14 @@ export const AgentsPage: FC = () => {
             if (!open) {
               setCreateError(null)
               createHarnessAgent.reset()
+              setCreateHermesProviderId('')
             }
           }}
           onRuntimeChange={setCreateRuntime}
           onHarnessAdapterChange={handleHarnessAdapterChange}
           onHarnessModelChange={setHarnessModelId}
           onHarnessReasoningChange={setHarnessReasoningEffort}
+          onHermesProviderChange={setCreateHermesProviderId}
           onNameChange={setNewName}
           onProviderChange={setCreateProviderId}
         />
