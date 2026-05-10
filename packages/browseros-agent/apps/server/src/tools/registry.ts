@@ -158,6 +158,27 @@ import {
   start_request_capture,
   stop_request_capture,
 } from './xc/request-replay'
+// XC Phase 8 — Performance & Profiling
+import { analyze_trace, start_trace, stop_trace } from './xc/trace'
+import {
+  get_heap_snapshot,
+  start_js_profiler,
+  stop_js_profiler,
+  summarize_profile,
+} from './xc/profiler'
+import {
+  get_service_worker_routes,
+  get_service_worker_script,
+  get_sw_cache_contents,
+  list_service_workers,
+  unregister_service_worker,
+} from './xc/service-workers'
+import {
+  evaluate_in_worker,
+  get_worker_globals,
+  get_worker_source,
+  list_web_workers,
+} from './xc/web-workers'
 
 export const registry = createRegistry([
   // Navigation (8)
@@ -312,4 +333,22 @@ export const registry = createRegistry([
   replay_request,
   export_har,
   clear_captured_requests,
+
+  // XC Phase 8 — Performance & Profiling (17)
+  start_trace,
+  stop_trace,
+  analyze_trace,
+  start_js_profiler,
+  stop_js_profiler,
+  summarize_profile,
+  get_heap_snapshot,
+  list_service_workers,
+  get_service_worker_script,
+  get_service_worker_routes,
+  unregister_service_worker,
+  get_sw_cache_contents,
+  list_web_workers,
+  evaluate_in_worker,
+  get_worker_source,
+  get_worker_globals,
 ])
