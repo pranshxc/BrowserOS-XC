@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { StreamableHTTPTransport } from '@hono/mcp'
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { toFetchResponse, toReqRes } from 'fetch-to-node'
 import { Hono } from 'hono'
 import type { Browser } from '../../browser/browser'
 import { logger } from '../../lib/logger'
@@ -65,14 +66,26 @@ export function createMcpRoutes(deps: McpRouteDeps) {
       aclRules,
       observer,
     })
-    const transport = new StreamableHTTPTransport({
+
+    // Use SDK-native StreamableHTTPServerTransport with fetch-to-node adapter.
+    // @hono/mcp's StreamableHTTPTransport wrapper throws an empty-message Error
+    // in Bun's fetch environment when sessionIdGenerator is undefined.
+    const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     })
 
+    const { req, res } = toReqRes(c.req.raw)
+
     try {
       await mcpServer.connect(transport)
-      return transport.handleRequest(c)
+      const body = await c.req.json()
+      await transport.handleRequest(req, res, body)
+      res.on('close', () => {
+        transport.close()
+        mcpServer.close()
+      })
+      return toFetchResponse(res)
     } catch (error) {
       Sentry.withScope((scope) => {
         scope.setTag('route', 'mcp')
