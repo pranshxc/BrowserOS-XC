@@ -72,6 +72,14 @@ import {
   list_windows,
 } from './windows'
 
+// ── XC Phase 1: Network Traffic Capture ──────────────────────────────────────
+import { get_network_requests } from './xc/network-requests'
+import {
+  get_har_summary,
+  start_har_recording,
+  stop_har_recording,
+} from './xc/network-har'
+
 export const registry = createRegistry([
   // Navigation (8)
   get_active_page,
@@ -153,4 +161,10 @@ export const registry = createRegistry([
   // Nudges (2)
   suggest_schedule,
   suggest_app_connection,
+
+  // ── XC Phase 1: Network Traffic Capture (4) ──────────────────────────────
+  get_network_requests,
+  start_har_recording,
+  stop_har_recording,
+  get_har_summary,
 ])
