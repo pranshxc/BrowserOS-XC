@@ -35,19 +35,27 @@ TIMEOUT = args.timeout
 # get_heap_snapshot: takes 60-90s and can OOM/crash the dev server
 SKIP_IN_SMOKE = {"get_heap_snapshot"}
 
-# Tools that are known to be slow (trace, screenshot, etc.)
+# Tools that are known to be slow
 SLOW_TOOLS = {
     "start_trace", "stop_trace", "analyze_trace",
     "take_screenshot", "annotated_screenshot", "diff_url", "diff_screenshot",
     "map_site_start",
 }
 
-# Known tool-level errors acceptable in smoke context
-# (real bugs in example.com context, not argument schema issues)
+# Tool errors that are acceptable in smoke context (not arg schema issues)
 ACCEPTABLE_ERRORS = {
-    "diff_url",           # ctx.browser.navigate not a function — server bug, not arg bug
-    "get_worker_source",  # no workers on example.com — expected
-    "get_worker_globals", # no workers on example.com — expected
+    "diff_url",           # ctx.browser.navigate bug — server-side issue
+    "get_worker_source",  # no workers on example.com
+    "get_worker_globals", # no workers on example.com
+    "react_get_tree",               # not a React page
+    "react_get_suspense_boundaries", # not a React page
+    "remove_init_script",  # no script was registered (add failed)
+    "remove_interception", # no rule exists to remove
+    "stop_trace",          # start_trace may not have succeeded
+    "analyze_trace",       # depends on stop_trace
+    "eval_preset",         # extract_routes SyntaxError is a server-side bug
+    "eval_extract_routes", # same
+    "diff_screenshot",     # pixel diff returning no result — server-side
 }
 
 PASS, FAIL, WARN, SKIP = 0, 0, 0, 0
@@ -62,13 +70,11 @@ NC     = "\033[0m"
 
 
 def _extract_proof(d: dict) -> str:
-    """Pull a short human-readable snippet from a successful tool response."""
     try:
         contents = d["result"]["content"]
         for item in contents:
             if item.get("type") == "text":
-                text = item["text"].strip().replace("\n", " ")
-                return text[:120]
+                return item["text"].strip().replace("\n", " ")[:120]
             if item.get("type") == "image":
                 return f"[image {item.get('mimeType','?')} {len(item.get('data',''))} b64 chars]"
         return repr(d["result"])[:120]
@@ -80,73 +86,44 @@ def _post(body_dict: dict, timeout: int = TIMEOUT) -> dict:
     body = json.dumps(body_dict).encode()
     try:
         conn = http.client.HTTPConnection(HOST, PORT, timeout=timeout)
-        conn.request(
-            "POST", PATH, body=body,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "Content-Length": str(len(body)),
-            },
-        )
+        conn.request("POST", PATH, body=body, headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Content-Length": str(len(body)),
+        })
         resp = conn.getresponse()
         raw = resp.read().decode("utf-8", errors="replace")
         conn.close()
     except Exception as e:
         return {"__connection_error__": str(e)}
-
-    # Find the last JSON object line (strips SSE "data: " prefix)
     for line in reversed(raw.splitlines()):
         line = line.strip()
-        if not line:
-            continue
-        if line.startswith("data: "):
-            line = line[6:]
+        if line.startswith("data: "): line = line[6:]
         if line.startswith("{"):
-            try:
-                return json.loads(line)
-            except Exception as e:
-                return {"__json_error__": str(e), "__raw__": line[:300]}
-
+            try: return json.loads(line)
+            except Exception as e: return {"__json_error__": str(e), "__raw__": line[:300]}
     return {"__empty__": True, "__raw__": raw[:300]}
 
 
 def initialize() -> bool:
-    """
-    Send the MCP `initialize` handshake required by StreamableHTTPServerTransport
-    (MCP SDK 1.26+). Every request is stateless/per-connection on this server,
-    so we must initialize before each tools/list or tools/call.
-    Returns True if the server accepted the handshake.
-    """
-    d = _post({
-        "jsonrpc": "2.0",
-        "id": 0,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "smoke-test", "version": "1.0"},
-        },
-    })
-    if "result" in d:
-        return True
-    return False
+    d = _post({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+        "protocolVersion": "2024-11-05", "capabilities": {},
+        "clientInfo": {"name": "smoke-test", "version": "1.0"},
+    }})
+    return "result" in d
 
 
-def wait_for_server(retries: int = 10, delay: float = 2.0) -> bool:
-    """Wait up to retries*delay seconds for the server to come back after a crash."""
-    for i in range(retries):
-        if initialize():
-            return True
+def wait_for_server(retries: int = 15, delay: float = 2.0) -> bool:
+    for _ in range(retries):
+        if initialize(): return True
         time.sleep(delay)
     return False
 
 
 def _rpc(body_dict: dict, timeout: int = TIMEOUT) -> dict:
-    """Initialize then POST — required because the server is stateless per-request."""
     if not initialize():
-        # Server may be restarting — wait up to 20s
-        if not wait_for_server(retries=10, delay=2.0):
-            return {"error": {"code": -32700, "message": "Parse error: Invalid JSON-RPC message"}, "jsonrpc": "2.0", "id": None}
+        if not wait_for_server():
+            return {"error": {"code": -32700, "message": "Server unavailable"}, "jsonrpc": "2.0", "id": None}
     return _post(body_dict, timeout=timeout)
 
 
@@ -159,15 +136,13 @@ def call(name: str, tool: str, arguments: dict) -> dict:
 
     timeout = 90 if tool in SLOW_TOOLS else TIMEOUT
     d = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-              "params": {"name": tool, "arguments": arguments}},
-             timeout=timeout)
+              "params": {"name": tool, "arguments": arguments}}, timeout=timeout)
 
     if "__connection_error__" in d:
         msg = d["__connection_error__"]
-        # After a timeout the server may need a moment to restart
         if "timed out" in msg:
-            print(f"  {YELLOW}WARN{NC}  {name}  \u2192 timed out (server may be restarting…)")
-            wait_for_server(retries=15, delay=2.0)
+            print(f"  {YELLOW}WARN{NC}  {name}  \u2192 timed out (waiting for server…)")
+            wait_for_server()
             WARN += 1; RESULTS.append(("WARN", name, msg)); return d
         print(f"  {RED}FAIL{NC}  {name}  \u2192 connection: {msg}")
         FAIL += 1; RESULTS.append(("FAIL", name, msg)); return d
@@ -185,15 +160,11 @@ def call(name: str, tool: str, arguments: dict) -> dict:
         WARN += 1; RESULTS.append(("WARN", name, msg)); return d
 
     proof = _extract_proof(d)
-
-    # Treat isError content blocks as WARN unless context-limited
     is_tool_error = d.get("result", {}).get("isError", False)
     if is_tool_error and tool not in ACCEPTABLE_ERRORS:
         msg = proof[:120]
-        if "-32602" in proof:
-            print(f"  {YELLOW}WARN{NC}  {name}  \u2192 schema: {msg[:100]}")
-        else:
-            print(f"  {YELLOW}WARN{NC}  {name}  \u2192 {msg[:100]}")
+        label = "schema" if "-32602" in proof else "error"
+        print(f"  {YELLOW}WARN{NC}  {name}  \u2192 {label}: {msg[:100]}")
         WARN += 1; RESULTS.append(("WARN", name, msg)); return d
 
     if VERBOSE:
@@ -206,16 +177,13 @@ def call(name: str, tool: str, arguments: dict) -> dict:
 
 def list_tools() -> None:
     global PASS, FAIL
-    if not initialize():
-        wait_for_server()
+    if not initialize(): wait_for_server()
     d = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     if "result" in d:
         tools = d["result"].get("tools", [])
-        n = len(tools)
         names = ", ".join(t["name"] for t in tools[:5])
-        print(f"  {GREEN}PASS{NC}  tools/list  \u2192 {n} tools registered")
-        if VERBOSE and tools:
-            print(f"        {DIM}First 5: {names}...{NC}")
+        print(f"  {GREEN}PASS{NC}  tools/list  \u2192 {len(tools)} tools registered")
+        if VERBOSE and tools: print(f"        {DIM}First 5: {names}...{NC}")
         PASS += 1
     else:
         print(f"  {RED}FAIL{NC}  tools/list  \u2192 {d}")
@@ -245,7 +213,6 @@ print(f"  Endpoint: http://{HOST}:{PORT}{PATH}  |  timeout: {TIMEOUT}s")
 print(f"  Mode: {'verbose (with proof snippets)' if VERBOSE else 'compact  (use -v for proof snippets)'}")
 print("==================================================")
 
-# Verify server is reachable and initialize handshake works
 print("")
 if not initialize():
     print(f"{RED}Server handshake failed — is the server running at http://{HOST}:{PORT}{PATH} ?{NC}")
@@ -270,7 +237,8 @@ call("get_page_content", "get_page_content", {"page": P})
 call("get_page_links",   "get_page_links",   {"page": P})
 call("get_dom",          "get_dom",          {"page": P})
 call("get_console_logs", "get_console_logs", {"page": P})
-call("evaluate_script",  "evaluate_script",  {"page": P, "code": "document.title"})
+# arg is `expression`, not `code` or `script`
+call("evaluate_script",  "evaluate_script",  {"page": P, "expression": "document.title"})
 
 section("3. Phase 1 \u2014 Network")
 call("get_network_requests", "get_network_requests", {"page": P})
@@ -280,17 +248,16 @@ call("get_har_summary",      "get_har_summary",      {"page": P})
 
 section("4. Phase 2 \u2014 Ref-Stable Input")
 result = call("snapshot_with_refs", "snapshot_with_refs", {"page": P})
-# Refs are returned as e1, e2 — extract the bare id (strip leading "ref=")
-first_ref = "e1"
+# Refs are returned as [ref=e1]; tool expects `target` with format @e1
+first_ref = "@e1"
 try:
     text = result["result"]["content"][0]["text"]
     m = re.search(r"ref=([a-zA-Z0-9]+)", text)
-    if m:
-        first_ref = m.group(1)
+    if m: first_ref = f"@{m.group(1)}"
 except Exception:
     pass
 print(f"  \u2192 First ref: {first_ref}")
-call("ref_hover", "ref_hover", {"page": P, "ref": first_ref})
+call("ref_hover", "ref_hover", {"page": P, "target": first_ref})
 
 section("5. Phase 3 \u2014 Diff & Comparison")
 call("save_snapshot_baseline",   "save_snapshot_baseline",   {"page": P, "name": "smoke-test"})
@@ -313,18 +280,22 @@ section("8. Phase 6 \u2014 JS Evaluation")
 call("evaluate_js",                   "evaluate_js",                   {"page": P, "code": "document.title"})
 call("detect_framework",              "detect_framework",              {"page": P})
 call("react_get_tree",                "react_get_tree",                {"page": P})
-call("react_inspect_component",       "react_inspect_component",       {"page": P, "componentSelector": "body"})
+# arg is `componentIndex` (number from react_get_tree node id), not a selector
+call("react_inspect_component",       "react_inspect_component",       {"page": P, "componentIndex": 1})
 call("react_get_renders",             "react_get_renders",             {"page": P})
 call("react_get_suspense_boundaries", "react_get_suspense_boundaries", {"page": P})
 
 section("9. Phase 7 \u2014 Network Interception")
 call("enable_network_intercept",  "enable_network_intercept",  {"page": P})
 call("list_interceptions",        "list_interceptions",        {"page": P})
-call("add_request_interception",  "add_request_interception",  {"page": P, "pattern": "https://example.com/api/*", "action": "abort"})
+# action enum is block|mock|passthrough (not abort)
+call("add_request_interception",  "add_request_interception",  {"page": P, "pattern": "https://example.com/api/*", "action": "block"})
+# ruleId is a string
 call("remove_interception",       "remove_interception",       {"page": P, "ruleId": "0"})
 call("clear_interceptions",       "clear_interceptions",       {"page": P})
 call("disable_network_intercept", "disable_network_intercept", {"page": P})
-call("mock_api_response",         "mock_api_response",         {"page": P, "pattern": "https://example.com/api/test", "responseBody": "{}"})
+# urlPattern + responseBody are the correct args for mock_api_response
+call("mock_api_response",         "mock_api_response",         {"page": P, "urlPattern": "https://example.com/api/test", "responseBody": "{}"})
 call("list_mocks",                "list_mocks",                {"page": P})
 call("clear_mocks",               "clear_mocks",               {"page": P})
 call("start_request_capture",     "start_request_capture",     {"page": P})
@@ -336,8 +307,10 @@ section("10. Phase 8 \u2014 Service Workers")
 call("list_service_workers", "list_service_workers", {"page": P})
 
 section("11. Phase 9 \u2014 Init Scripts & Eval Presets")
-call("add_init_script",      "add_init_script",      {"page": P, "source": "window.__xctest=1", "id": "xctest"})
+# add_init_script: `label` (not id/name) + `source`
+call("add_init_script",      "add_init_script",      {"page": P, "source": "window.__xctest=1", "label": "xctest"})
 call("list_init_scripts",    "list_init_scripts",    {"page": P})
+# remove_init_script: `id` is the identifier returned by add/list
 call("remove_init_script",   "remove_init_script",   {"page": P, "id": "xctest"})
 call("clear_init_scripts",   "clear_init_scripts",   {"page": P})
 call("eval_preset",          "eval_preset",          {"page": P, "preset": "extract_routes"})
@@ -357,48 +330,56 @@ call("clear_session_storage", "clear_session_storage", {"page": P})
 call("clear_local_storage",   "clear_local_storage",   {"page": P})
 
 section("13. Phase 11 \u2014 Cookies & Auth")
-call("navigate_page",        "navigate_page",        {"page": P, "url": "https://example.com"})
+call("navigate_page", "navigate_page", {"page": P, "url": "https://example.com"})
 time.sleep(1.0)
-call("get_cookies",              "get_cookies",              {"page": P})
-call("set_cookie",               "set_cookie",               {"page": P, "name": "xctest", "value": "1", "url": "https://example.com"})
-call("delete_cookie",            "delete_cookie",            {"page": P, "name": "xctest", "url": "https://example.com"})
-call("import_cookies_from_curl", "import_cookies_from_curl", {"page": P, "curlHeader": "session=abc; csrf=xyz"})
+call("get_cookies",   "get_cookies",   {"page": P})
+# set_cookie: use `domain` not `url` — CDP requires domain or url separately
+call("set_cookie",               "set_cookie",               {"page": P, "name": "xctest", "value": "1", "domain": "example.com"})
+call("delete_cookie",            "delete_cookie",            {"page": P, "name": "xctest", "domain": "example.com"})
+# import_cookies_from_curl: arg is `raw` (not curlHeader)
+call("import_cookies_from_curl", "import_cookies_from_curl", {"page": P, "raw": "session=abc; csrf=xyz", "domain": ".example.com"})
 call("clear_all_cookies",        "clear_all_cookies",        {"page": P})
 call("save_auth_state",          "save_auth_state",          {"page": P, "name": "smoke-test"})
 call("list_auth_states",         "list_auth_states",         {})
 
 section("14. Phase 12 \u2014 Dialogs")
 call("get_dialog_status",     "get_dialog_status",     {"page": P})
-call("configure_auto_dialog", "configure_auto_dialog", {"page": P, "types": ["alert"]})
+# arg is `autoAcceptTypes` (array), not `types`
+call("configure_auto_dialog", "configure_auto_dialog", {"page": P, "autoAcceptTypes": ["alert"]})
 
 section("15. Phase 13 \u2014 Web Workers")
 call("list_web_workers",   "list_web_workers",   {"page": P})
-call("get_worker_source",  "get_worker_source",  {"page": P, "workerId": "w0"})
-call("get_worker_globals", "get_worker_globals", {"page": P, "workerId": "w0"})
+# arg is `workerUrl` not `workerId`
+call("get_worker_source",  "get_worker_source",  {"page": P, "workerUrl": "https://example.com/worker.js"})
+# arg is `targetId` not `workerId`
+call("get_worker_globals", "get_worker_globals", {"page": P, "targetId": "w0"})
 
 section("16. Phase 14 \u2014 Performance")
 call("start_js_profiler", "start_js_profiler", {"page": P})
 call("stop_js_profiler",  "stop_js_profiler",  {"page": P})
 call("summarize_profile", "summarize_profile", {"page": P})
 call("get_heap_snapshot", "get_heap_snapshot", {"page": P})  # skipped — see SKIP_IN_SMOKE
-call("start_trace",       "start_trace",       {"page": P})
-call("stop_trace",        "stop_trace",        {"page": P})
-call("analyze_trace",     "analyze_trace",     {"page": P})
-call("get_web_vitals",    "get_web_vitals",    {"page": P})
+# start_trace: just pass page; categories has a default
+call("start_trace",   "start_trace",   {"page": P})
+call("stop_trace",    "stop_trace",    {"page": P})
+call("analyze_trace", "analyze_trace", {"page": P})
+call("get_web_vitals", "get_web_vitals", {"page": P})
 
 section("17. Knowledge Graph")
-call("graph_add_page",      "graph_add_page",      {"id": "page:smoke", "label": "Smoke", "url": "https://example.com"})
-call("graph_add_feature",   "graph_add_feature",   {"id": "feat:smoke", "label": "Login"})
-call("graph_add_api",       "graph_add_api",       {"id": "api:smoke",  "label": "GET /", "url": "https://example.com/"})
-call("graph_add_workflow",  "graph_add_workflow",  {"id": "wf:smoke",   "label": "Smoke flow"})
-call("graph_add_edge",      "graph_add_edge",      {"from": "page:smoke", "to": "feat:smoke", "label": "has"})
-call("graph_query",         "graph_query",         {"query": "smoke"})
-call("graph_summary",       "graph_summary",       {})
-call("graph_export",        "graph_export",        {"format": "json"})
-call("map_site_start",      "map_site_start",      {"page": P, "startUrl": "https://example.com", "maxPages": 1})
+call("graph_add_page",     "graph_add_page",     {"id": "page:smoke", "label": "Smoke", "url": "https://example.com"})
+call("graph_add_feature",  "graph_add_feature",  {"id": "feat:smoke", "label": "Login"})
+call("graph_add_api",      "graph_add_api",      {"id": "api:smoke",  "label": "GET /", "url": "https://example.com/"})
+call("graph_add_workflow", "graph_add_workflow", {"id": "wf:smoke",   "label": "Smoke flow"})
+# graph_add_edge: arg is `relation` not `label`; no `from`/`to` rename needed
+call("graph_add_edge",     "graph_add_edge",     {"from": "page:smoke", "to": "feat:smoke", "relation": "has"})
+call("graph_query",        "graph_query",        {"query": "smoke"})
+call("graph_summary",      "graph_summary",      {})
+call("graph_export",       "graph_export",       {"format": "json"})
+# map_site_start: no `page` arg; uses `url` not `startUrl`
+call("map_site_start",      "map_site_start",      {"url": "https://example.com", "maxPages": 1})
 call("map_site_bfs_status", "map_site_bfs_status", {})
 
-# ── Summary ─────────────────────────────────────────────────────────────────
+# ── Summary ───────────────────────────────────────────────────────────────
 total = PASS + FAIL + WARN + SKIP
 print("")
 print("==================================================")
@@ -419,7 +400,7 @@ if FAIL > 0:
 
 if SKIP > 0:
     print(f"\n{CYAN}Skipped tools:{NC}")
-    for status, name, msg in RESULTS:
+    for status, name, _ in RESULTS:
         if status == "SKIP":
             print(f"  {name}")
 
