@@ -71,14 +71,9 @@ import {
   create_window,
   list_windows,
 } from './windows'
-
-// ── XC Phase 1: Network Traffic Capture ──────────────────────────────────────
-import { get_network_requests } from './xc/network-requests'
-import {
-  get_har_summary,
-  start_har_recording,
-  stop_har_recording,
-} from './xc/network-har'
+// XC Phase 2 — Element Ref System
+import { ref_click, ref_fill, ref_hover } from './xc/ref-input'
+import { snapshot_with_refs } from './xc/snapshot-with-refs'
 
 export const registry = createRegistry([
   // Navigation (8)
@@ -162,9 +157,9 @@ export const registry = createRegistry([
   suggest_schedule,
   suggest_app_connection,
 
-  // ── XC Phase 1: Network Traffic Capture (4) ──────────────────────────────
-  get_network_requests,
-  start_har_recording,
-  stop_har_recording,
-  get_har_summary,
+  // XC Phase 2 — Element Ref System (4)
+  snapshot_with_refs,
+  ref_click,
+  ref_fill,
+  ref_hover,
 ])
