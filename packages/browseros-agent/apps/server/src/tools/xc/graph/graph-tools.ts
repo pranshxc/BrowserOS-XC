@@ -15,7 +15,7 @@ import {
 export const graph_add_page = defineTool({
   name: 'graph_add_page',
   description: 'Add a discovered page/route to the knowledge graph.',
-  approvalCategory: 'read',
+  approvalCategory: 'observation',
   input: z.object({
     id: z.string().describe('Unique node ID, e.g. page:/dashboard'),
     label: z.string().describe('Human-readable page name'),
@@ -32,7 +32,7 @@ export const graph_add_page = defineTool({
 export const graph_add_feature = defineTool({
   name: 'graph_add_feature',
   description: 'Add a discovered UI feature or capability to the knowledge graph.',
-  approvalCategory: 'read',
+  approvalCategory: 'observation',
   input: z.object({
     id: z.string().describe('Unique node ID, e.g. feature:login'),
     label: z.string().describe('Feature name'),
@@ -48,7 +48,7 @@ export const graph_add_feature = defineTool({
 export const graph_add_api = defineTool({
   name: 'graph_add_api',
   description: 'Add a discovered API endpoint or background request to the knowledge graph.',
-  approvalCategory: 'read',
+  approvalCategory: 'observation',
   input: z.object({
     id: z.string().describe('Unique node ID, e.g. api:POST:/auth/login'),
     label: z.string().describe('Endpoint label'),
@@ -65,7 +65,7 @@ export const graph_add_api = defineTool({
 export const graph_add_workflow = defineTool({
   name: 'graph_add_workflow',
   description: 'Add a multi-step user workflow or journey to the knowledge graph.',
-  approvalCategory: 'read',
+  approvalCategory: 'observation',
   input: z.object({
     id: z.string().describe('Unique node ID, e.g. workflow:signup'),
     label: z.string().describe('Workflow name'),
@@ -81,11 +81,13 @@ export const graph_add_workflow = defineTool({
 export const graph_add_edge = defineTool({
   name: 'graph_add_edge',
   description: 'Add a directed relationship (edge) between two nodes in the knowledge graph.',
-  approvalCategory: 'read',
+  approvalCategory: 'observation',
   input: z.object({
     from: z.string().describe('Source node ID'),
     to: z.string().describe('Target node ID'),
-    relation: z.string().describe('Relationship type, e.g. "navigates_to", "calls", "requires", "part_of"'),
+    relation: z.string().describe(
+      'Relationship type, e.g. "navigates_to", "calls", "requires", "part_of"',
+    ),
     metadata: z.record(z.unknown()).optional(),
   }),
   async handler(args, _ctx, response) {
@@ -97,9 +99,12 @@ export const graph_add_edge = defineTool({
 export const graph_query = defineTool({
   name: 'graph_query',
   description: 'Query nodes and edges from the knowledge graph.',
-  approvalCategory: 'read',
+  approvalCategory: 'observation',
   input: z.object({
-    kind: z.enum(['page', 'feature', 'api', 'workflow']).optional().describe('Filter nodes by kind'),
+    kind: z
+      .enum(['page', 'feature', 'api', 'workflow'])
+      .optional()
+      .describe('Filter nodes by kind'),
     fromId: z.string().optional().describe('Filter edges by source node ID'),
     relation: z.string().optional().describe('Filter edges by relation type'),
   }),
@@ -113,7 +118,7 @@ export const graph_query = defineTool({
 export const graph_export = defineTool({
   name: 'graph_export',
   description: 'Export the full knowledge graph as JSON.',
-  approvalCategory: 'read',
+  approvalCategory: 'observation',
   input: z.object({}),
   async handler(_args, _ctx, response) {
     const data = exportGraph()
@@ -123,8 +128,9 @@ export const graph_export = defineTool({
 
 export const graph_summary = defineTool({
   name: 'graph_summary',
-  description: 'Get a summary of the current knowledge graph (node/edge counts by kind).',
-  approvalCategory: 'read',
+  description:
+    'Get a summary of the current knowledge graph (node/edge counts by kind).',
+  approvalCategory: 'observation',
   input: z.object({}),
   async handler(_args, _ctx, response) {
     const summary = graphSummary()

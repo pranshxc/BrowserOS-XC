@@ -1,6 +1,5 @@
 /**
  * map-site-skill.ts — BFS orchestrator tools for autonomous website intelligence mapping.
- * Uses BrowserOS browser tools to crawl a site and populate the knowledge graph.
  */
 import { z } from 'zod'
 import { defineTool } from '../../framework'
@@ -25,15 +24,31 @@ export const map_site_start = defineTool({
     'Start an autonomous BFS crawl of a website to build its knowledge graph. ' +
     'Navigates pages, discovers features, APIs, and workflows, and populates the graph. ' +
     'Call graph_export or graph_summary after completion to inspect results.',
-  approvalCategory: 'read',
+  approvalCategory: 'observation',
   input: z.object({
     url: z.string().describe('Root URL to start mapping from'),
-    maxDepth: z.number().int().min(1).max(5).default(2).describe('Maximum BFS depth'),
-    maxPages: z.number().int().min(1).max(100).default(20).describe('Maximum pages to visit'),
+    maxDepth: z
+      .number()
+      .int()
+      .min(1)
+      .max(5)
+      .default(2)
+      .describe('Maximum BFS depth (default: 2)'),
+    maxPages: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .default(20)
+      .describe('Maximum pages to visit (default: 20)'),
   }),
   async handler(args, ctx, response) {
     const origin = (() => {
-      try { return new URL(args.url).origin } catch { return args.url }
+      try {
+        return new URL(args.url).origin
+      } catch {
+        return args.url
+      }
     })()
 
     bfsState = {
@@ -64,29 +79,30 @@ export const map_site_start = defineTool({
       pagesVisited++
 
       const depth = bfsState.depthMap.get(url) ?? 0
-
       let pageId: number | undefined
+
       try {
-        // Open a hidden background tab so the user's active tab is not disturbed
         pageId = await ctx.browser.newPage(url, { background: true })
         await ctx.browser.goto(pageId, url)
 
-        // Get title via evaluate (returns { value?, error? })
         const titleResult = await ctx.browser.evaluate(
           pageId,
           'document.title || document.location.pathname',
         )
-        const title = typeof titleResult.value === 'string' ? titleResult.value : url
+        const title =
+          typeof titleResult.value === 'string' ? titleResult.value : url
 
-        // Use built-in getPageLinks which walks the AX tree properly
         const links = await ctx.browser.getPageLinks(pageId)
         const sameSiteLinks = links
           .map((l) => l.href)
           .filter((h) => {
-            try { return new URL(h).origin === origin } catch { return false }
+            try {
+              return new URL(h).origin === origin
+            } catch {
+              return false
+            }
           })
 
-        // Upsert page node with resolved title
         addNode({
           id: `page:${url}`,
           kind: 'page',
@@ -97,7 +113,10 @@ export const map_site_start = defineTool({
 
         if (depth < args.maxDepth) {
           for (const link of sameSiteLinks) {
-            if (!bfsState.visited.has(link) && !bfsState.queue.includes(link)) {
+            if (
+              !bfsState.visited.has(link) &&
+              !bfsState.queue.includes(link)
+            ) {
               bfsState.queue.push(link)
               bfsState.depthMap.set(link, depth + 1)
               addNode({
@@ -116,10 +135,14 @@ export const map_site_start = defineTool({
           }
         }
       } catch {
-        // Non-fatal: skip pages that error (cross-origin, auth-wall, etc.)
+        // Non-fatal: skip pages that error
       } finally {
         if (pageId !== undefined) {
-          try { await ctx.browser.closePage(pageId) } catch { /* ignore */ }
+          try {
+            await ctx.browser.closePage(pageId)
+          } catch {
+            // ignore close errors
+          }
         }
       }
     }
@@ -127,11 +150,15 @@ export const map_site_start = defineTool({
     bfsState.status = 'done'
     const summary = graphSummary()
     response.text(
-      JSON.stringify({
-        status: 'done',
-        pagesVisited,
-        graph: summary,
-      }, null, 2),
+      JSON.stringify(
+        {
+          status: 'done',
+          pagesVisited,
+          graph: summary,
+        },
+        null,
+        2,
+      ),
     )
   },
 })
@@ -139,22 +166,28 @@ export const map_site_start = defineTool({
 export const map_site_bfs_status = defineTool({
   name: 'map_site_bfs_status',
   description: 'Get the current status of an in-progress map_site_start BFS crawl.',
-  approvalCategory: 'read',
+  approvalCategory: 'observation',
   input: z.object({}),
   async handler(_args, _ctx, response) {
     if (!bfsState) {
-      response.text(JSON.stringify({ status: 'idle', message: 'No crawl started yet.' }))
+      response.text(
+        JSON.stringify({ status: 'idle', message: 'No crawl started yet.' }),
+      )
       return
     }
     response.text(
-      JSON.stringify({
-        status: bfsState.status,
-        rootUrl: bfsState.rootUrl,
-        visited: bfsState.visited.size,
-        queued: bfsState.queue.length,
-        elapsedMs: Date.now() - bfsState.startedAt,
-        graph: graphSummary(),
-      }, null, 2),
+      JSON.stringify(
+        {
+          status: bfsState.status,
+          rootUrl: bfsState.rootUrl,
+          visited: bfsState.visited.size,
+          queued: bfsState.queue.length,
+          elapsedMs: Date.now() - bfsState.startedAt,
+          graph: graphSummary(),
+        },
+        null,
+        2,
+      ),
     )
   },
 })
@@ -162,21 +195,30 @@ export const map_site_bfs_status = defineTool({
 export const map_site_enqueue = defineTool({
   name: 'map_site_enqueue',
   description: 'Manually enqueue a URL into the active BFS crawl queue.',
-  approvalCategory: 'read',
+  approvalCategory: 'observation',
   input: z.object({
     url: z.string().describe('URL to add to the crawl queue'),
   }),
   async handler(args, _ctx, response) {
     if (!bfsState || bfsState.status === 'done') {
-      response.text(JSON.stringify({ error: 'No active crawl. Run map_site_start first.' }))
+      response.text(
+        JSON.stringify({
+          error: 'No active crawl. Run map_site_start first.',
+        }),
+      )
       return
     }
-    if (!bfsState.visited.has(args.url) && !bfsState.queue.includes(args.url)) {
+    if (
+      !bfsState.visited.has(args.url) &&
+      !bfsState.queue.includes(args.url)
+    ) {
       bfsState.queue.push(args.url)
       bfsState.depthMap.set(args.url, 0)
       response.text(JSON.stringify({ queued: true, url: args.url }))
     } else {
-      response.text(JSON.stringify({ queued: false, reason: 'Already visited or queued.' }))
+      response.text(
+        JSON.stringify({ queued: false, reason: 'Already visited or queued.' }),
+      )
     }
   },
 })
