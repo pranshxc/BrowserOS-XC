@@ -110,6 +110,20 @@ import {
   switch_to_frame,
   switch_to_main_frame,
 } from './xc/frames'
+// XC Phase 5 — Visual Intelligence
+import {
+  annotated_screenshot,
+  clear_visual_annotations,
+} from './xc/screenshot-annotated'
+import {
+  diff_snapshot,
+  save_snapshot_baseline,
+} from './xc/diff-snapshot'
+import {
+  diff_screenshot,
+  save_screenshot_baseline,
+} from './xc/diff-screenshot'
+import { diff_url } from './xc/diff-url'
 
 export const registry = createRegistry([
   // Navigation (8)
@@ -227,4 +241,13 @@ export const registry = createRegistry([
   get_active_frame,
   snapshot_all_frames,
   snapshot_frame,
+
+  // XC Phase 5 — Visual Intelligence (8)
+  annotated_screenshot,
+  clear_visual_annotations,
+  save_snapshot_baseline,
+  diff_snapshot,
+  save_screenshot_baseline,
+  diff_screenshot,
+  diff_url,
 ])
