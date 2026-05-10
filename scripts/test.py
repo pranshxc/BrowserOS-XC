@@ -8,22 +8,25 @@ Compatible with Python 3.9+
 from __future__ import annotations
 
 import datetime
+import http.client
 import json
 import re
 import sys
 import time
 import argparse
-from typing import Optional
-from urllib.request import urlopen, Request
-from urllib.error import URLError
+from urllib.parse import urlparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--base", default="http://localhost:9100/mcp")
 args = parser.parse_args()
-BASE = args.base
+
+_parsed = urlparse(args.base)
+HOST = _parsed.hostname or "localhost"
+PORT = _parsed.port or 9100
+PATH = _parsed.path or "/mcp"
 
 PASS, FAIL, WARN = 0, 0, 0
-RESULTS = []
+RESULTS: list = []
 
 GREEN  = "\033[0;32m"
 RED    = "\033[0;31m"
@@ -31,45 +34,66 @@ YELLOW = "\033[1;33m"
 NC     = "\033[0m"
 
 
-def _post(body_dict: dict) -> Optional[dict]:
+def _post(body_dict: dict) -> dict:
+    """POST body_dict as JSON-RPC; returns parsed response dict or error sentinel."""
     body = json.dumps(body_dict).encode()
-    req = Request(
-        BASE, data=body,
-        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
-        method="POST",
-    )
     try:
-        with urlopen(req, timeout=15) as resp:
-            raw = resp.read().decode()
-    except URLError as e:
+        conn = http.client.HTTPConnection(HOST, PORT, timeout=20)
+        conn.request(
+            "POST", PATH, body=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "Content-Length": str(len(body)),
+            },
+        )
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", errors="replace")
+        conn.close()
+    except Exception as e:
         return {"__connection_error__": str(e)}
-    lines = [l for l in raw.splitlines() if l.strip()]
-    json_line = lines[-1] if lines else ""
-    if json_line.startswith("data: "):
-        json_line = json_line[6:]
+
+    # Strip SSE envelope lines ("data: ...", "event: ...", empty lines)
+    json_line = ""
+    for line in reversed(raw.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("data: "):
+            line = line[6:]
+        if line.startswith("{"):
+            json_line = line
+            break
+
+    if not json_line:
+        return {"__empty__": True, "__raw__": raw[:300]}
+
     try:
         return json.loads(json_line)
     except Exception as e:
-        return {"__json_error__": str(e), "__raw__": json_line[:200]}
+        return {"__json_error__": str(e), "__raw__": json_line[:300]}
 
 
-def call(name: str, tool: str, arguments: dict) -> Optional[dict]:
+def call(name: str, tool: str, arguments: dict) -> dict:
     global PASS, FAIL, WARN
     d = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                "params": {"name": tool, "arguments": arguments}})
-    if d is None or "__connection_error__" in d:
-        msg = (d or {}).get("__connection_error__", "no response")
-        print(f"  {RED}FAIL{NC}  {name}  \u2192 {msg}")
-        FAIL += 1; RESULTS.append(("FAIL", name, msg)); return None
-    if "__json_error__" in d:
-        msg = d["__json_error__"]
-        print(f"  {RED}FAIL{NC}  {name}  \u2192 invalid JSON: {msg}")
-        FAIL += 1; RESULTS.append(("FAIL", name, msg)); return None
+
+    if "__connection_error__" in d:
+        print(f"  {RED}FAIL{NC}  {name}  \u2192 connection: {d['__connection_error__']}")
+        FAIL += 1; RESULTS.append(("FAIL", name, d["__connection_error__"])); return d
+    if "__json_error__" in d or "__empty__" in d:
+        raw = d.get("__raw__", "")
+        msg = d.get("__json_error__", "empty response")
+        print(f"  {RED}FAIL{NC}  {name}  \u2192 {msg} | raw: {raw[:80]}")
+        FAIL += 1; RESULTS.append(("FAIL", name, msg)); return d
+
     err = d.get("error")
     if err:
-        msg = err.get("message", str(err))[:120] if isinstance(err, dict) else str(err)[:120]
+        msg = (err.get("message", str(err)) if isinstance(err, dict) else str(err))[:120]
         print(f"  {YELLOW}WARN{NC}  {name}  \u2192 {msg}")
         WARN += 1; RESULTS.append(("WARN", name, msg)); return d
+
     print(f"  {GREEN}PASS{NC}  {name}")
     PASS += 1; RESULTS.append(("PASS", name, "")); return d
 
@@ -77,7 +101,7 @@ def call(name: str, tool: str, arguments: dict) -> Optional[dict]:
 def list_tools() -> None:
     global PASS, FAIL
     d = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
-    if d and "result" in d:
+    if "result" in d:
         n = len(d["result"].get("tools", []))
         print(f"  {GREEN}PASS{NC}  tools/list  \u2192 {n} tools registered")
         PASS += 1
@@ -90,7 +114,7 @@ def get_page_id() -> int:
     d = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                "params": {"name": "list_pages", "arguments": {}}})
     try:
-        text = d["result"]["content"][0]["text"]  # type: ignore
+        text = d["result"]["content"][0]["text"]
         m = re.search(r"(?:id|page)[:\s]+([0-9]+)", text, re.I) or re.search(r"([0-9]+)", text)
         return int(m.group(1)) if m else 1
     except Exception:
@@ -105,6 +129,7 @@ print("")
 print("==================================================")
 print("  BrowserOS XC \u2014 Full Tool Smoke Test")
 print(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"  Endpoint: http://{HOST}:{PORT}{PATH}")
 print("==================================================")
 
 section("0. Meta")
@@ -137,7 +162,7 @@ section("4. Phase 2 \u2014 Ref-Stable Input")
 result = call("snapshot_with_refs", "snapshot_with_refs", {"page": P})
 first_ref = "ref:1"
 try:
-    text = result["result"]["content"][0]["text"]  # type: ignore
+    text = result["result"]["content"][0]["text"]
     m = re.search(r"(ref:[a-zA-Z0-9_:\-]+)", text)
     if m: first_ref = m.group(1)
 except Exception:
@@ -201,10 +226,10 @@ call("eval_extract_redux",   "eval_extract_redux",   {"page": P})
 call("eval_extract_i18n",    "eval_extract_i18n",    {"page": P})
 
 section("12. Phase 10 \u2014 Storage")
-call("get_local_storage",    "get_local_storage",    {"page": P})
-call("set_local_storage",    "set_local_storage",    {"page": P, "key": "xctest", "value": "hello"})
-call("get_session_storage",  "get_session_storage",  {"page": P})
-call("set_session_storage",  "set_session_storage",  {"page": P, "key": "xctest", "value": "hello"})
+call("get_local_storage",     "get_local_storage",     {"page": P})
+call("set_local_storage",     "set_local_storage",     {"page": P, "key": "xctest", "value": "hello"})
+call("get_session_storage",   "get_session_storage",   {"page": P})
+call("set_session_storage",   "set_session_storage",   {"page": P, "key": "xctest", "value": "hello"})
 call("full_storage_snapshot", "full_storage_snapshot", {"page": P})
 call("clear_session_storage", "clear_session_storage", {"page": P})
 call("clear_local_storage",   "clear_local_storage",   {"page": P})
@@ -249,7 +274,7 @@ call("graph_export",        "graph_export",        {"format": "json"})
 call("map_site_start",      "map_site_start",      {"page": P, "startUrl": "https://example.com", "maxPages": 1})
 call("map_site_bfs_status", "map_site_bfs_status", {})
 
-# ── Summary ────────────────────────────────────────────────────────────────
+# ── Summary ────────────────────────────────────────────────────────────────────
 total = PASS + FAIL + WARN
 print("")
 print("==================================================")
