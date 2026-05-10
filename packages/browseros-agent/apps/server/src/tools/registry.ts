@@ -133,6 +133,31 @@ import {
 } from './xc/react-devtools'
 import { get_web_vitals } from './xc/web-vitals'
 import { detect_framework } from './xc/framework-detect'
+// XC Phase 7 — Network Interception & Mocking
+import {
+  add_request_interception,
+  clear_interceptions,
+  disable_network_intercept,
+  enable_network_intercept,
+  list_interceptions,
+  remove_interception,
+} from './xc/network-intercept'
+import {
+  clear_mocks,
+  list_mocks,
+  mock_api_response,
+  mock_network_error,
+  mock_redirect,
+  update_mock,
+} from './xc/network-mock'
+import {
+  clear_captured_requests,
+  export_har,
+  list_captured_requests,
+  replay_request,
+  start_request_capture,
+  stop_request_capture,
+} from './xc/request-replay'
 
 export const registry = createRegistry([
   // Navigation (8)
@@ -267,4 +292,24 @@ export const registry = createRegistry([
   react_get_suspense_boundaries,
   get_web_vitals,
   detect_framework,
+
+  // XC Phase 7 — Network Interception & Mocking (18)
+  add_request_interception,
+  list_interceptions,
+  remove_interception,
+  clear_interceptions,
+  enable_network_intercept,
+  disable_network_intercept,
+  mock_api_response,
+  mock_network_error,
+  mock_redirect,
+  update_mock,
+  list_mocks,
+  clear_mocks,
+  start_request_capture,
+  stop_request_capture,
+  list_captured_requests,
+  replay_request,
+  export_har,
+  clear_captured_requests,
 ])
