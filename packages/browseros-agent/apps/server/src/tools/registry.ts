@@ -96,6 +96,20 @@ import {
   set_session_storage,
 } from './xc/storage'
 import { full_storage_snapshot } from './xc/storage-snapshot'
+// XC Phase 4 — Dialog & Frame Handling
+import {
+  configure_auto_dialog,
+  dialog_accept,
+  dialog_dismiss,
+  get_dialog_status,
+} from './xc/dialogs'
+import { snapshot_all_frames, snapshot_frame } from './xc/frame-snapshot'
+import {
+  get_active_frame,
+  list_frames,
+  switch_to_frame,
+  switch_to_main_frame,
+} from './xc/frames'
 
 export const registry = createRegistry([
   // Navigation (8)
@@ -201,4 +215,16 @@ export const registry = createRegistry([
   save_auth_state,
   load_auth_state,
   list_auth_states,
+
+  // XC Phase 4 — Dialog & Frame Handling (10)
+  get_dialog_status,
+  dialog_accept,
+  dialog_dismiss,
+  configure_auto_dialog,
+  list_frames,
+  switch_to_frame,
+  switch_to_main_frame,
+  get_active_frame,
+  snapshot_all_frames,
+  snapshot_frame,
 ])
