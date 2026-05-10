@@ -84,7 +84,9 @@ export function registerTools(
       {
         description: tool.description,
         inputSchema: tool.input as unknown as Record<string, never>,
-        outputSchema: tool.output as unknown as Record<string, never>,
+        ...(tool.output !== undefined && {
+          outputSchema: tool.output as unknown as Record<string, never>,
+        }),
       },
       handler,
     )
