@@ -1,169 +1,176 @@
 /**
- * BrowserOS-XC Phase 10 — MapSite Autonomous Orchestrator
- *
- * Exports:
- *   MAP_SITE_PROMPT      — mission briefing injected when agent enters MapSite mode
- *   map_site_start       — trigger tool: seeds BFS queue, inits graph, returns prompt
- *   map_site_bfs_status  — check queue state mid-run
- *   map_site_enqueue     — explicitly add URLs to the BFS queue
+ * map-site-skill.ts — BFS orchestrator tools for autonomous website intelligence mapping.
+ * Uses BrowserOS browser tools to crawl a site and populate the knowledge graph.
  */
-
-import { tool } from 'ai'
 import { z } from 'zod'
-import { getGraph, initGraph, resetGraph } from './graph-store'
+import { defineTool } from '../../framework'
+import { addEdge, addNode, graphSummary } from './graph-store'
 
-// ── BFS state (in-process) ────────────────────────────────────────────────────
-
-interface QueueEntry {
-  url: string
-  depth: number
-  parentFeatureId?: string
+interface BfsState {
+  rootUrl: string
+  visited: Set<string>
+  queue: string[]
+  maxDepth: number
+  maxPages: number
+  depthMap: Map<string, number>
+  status: 'idle' | 'running' | 'done'
+  startedAt: number
 }
 
-const _queue: QueueEntry[] = []
-const _visited = new Set<string>()
-let _rootUrl = ''
-let _maxDepth = 3
-let _maxPages = 50
+let bfsState: BfsState | null = null
 
-export function bfsEnqueue(url: string, depth: number, parentFeatureId?: string): void {
-  const norm = url.split('#')[0].replace(/\/$/, '')
-  if (_visited.has(norm)) return
-  if (_queue.some((e) => e.url === norm)) return
-  _queue.push({ url: norm, depth, parentFeatureId })
-}
-
-export function bfsDequeue(): QueueEntry | undefined {
-  const entry = _queue.shift()
-  if (entry) _visited.add(entry.url.split('#')[0].replace(/\/$/, ''))
-  return entry
-}
-
-export function bfsState() {
-  return {
-    queueLength: _queue.length,
-    visitedCount: _visited.size,
-    rootUrl: _rootUrl,
-    maxDepth: _maxDepth,
-    maxPages: _maxPages,
-    nextUrls: _queue.slice(0, 5).map((e) => e.url),
-  }
-}
-
-// ── Mission Prompt ────────────────────────────────────────────────────────────
-
-export const MAP_SITE_PROMPT = `
-# MapSite Mission — BrowserOS-XC Intelligence Mapping
-
-You are in autonomous **MapSite** mode. Build a complete **Knowledge Graph** of
-the target website — features, workflows, API calls, and dependencies.
-
-## Phase A — Initialise
-1. map_site_start({ url, maxDepth, maxPages })
-2. add_init_script({ builtin: 'fetch_logger' })
-3. add_init_script({ builtin: 'navigation_logger' })
-
-## Phase B — Per-Page Loop (repeat until queue empty or maxPages reached)
-1. map_site_bfs_status()               → get next URL
-2. navigate_page({ url })
-3. graph_add_page({ url, title, framework, interactiveElementCount })
-4. start_request_capture()
-5. [call applicable eval_extract_* tools]
-6. snapshot_with_refs()                → all interactive elements
-7. For each interactive element:
-   • Infer feature name (LLM)
-   • graph_query({ question: featureName })  → dedup check
-   • graph_add_feature({ name, description, pageUrl, authRequired, confidence })
-   • graph_add_edge({ from: pageId, to: featureId, type: 'renders_on' })
-   • if link → map_site_enqueue({ urls: [href], depth: depth+1 })
-8. For key buttons/forms:
-   • ref_click → observe
-   • stop_request_capture() → list_captured_requests()
-   • graph_add_api({ method, urlPattern }) for each new request
-   • graph_add_edge({ from: featureId, to: apiId, type: 'calls_api' })
-   • if navigated → graph_add_edge({ type: 'navigates_to' })
-   • if redirect to /login → mark authRequired, graph_add_edge({ type: 'requires' })
-   • navigate back if needed, restart_request_capture()
-
-## Phase C — Workflows
-  graph_add_workflow({ name, steps, triggeredAPIs }) for each major journey
-
-## Phase D — Export
-  graph_summary()
-  graph_export({ format: 'mermaid' })
-  graph_export({ format: 'all' })
-
-## Rules
-- Never visit the same URL twice
-- Never perform destructive actions (no real POSTs, no delete, no purchase)
-- Parametrize API URLs: /item/12345 → /item/:id
-- Always dedup with graph_query before graph_add_*
-- Stop when queue empty OR maxPages reached
-`.trim()
-
-// ── map_site_start ────────────────────────────────────────────────────────────
-
-export const map_site_start = tool({
+export const map_site_start = defineTool({
+  name: 'map_site_start',
   description:
-    'Start a MapSite autonomous intelligence-mapping session. '
-    + 'Seeds the BFS crawl queue, initialises the knowledge graph store, '
-    + 'and returns the mission briefing the agent must follow. '
-    + 'Call this ONCE at the start.',
-  parameters: z.object({
-    url: z.string().url().describe('Root URL to map, e.g. https://news.ycombinator.com'),
-    maxDepth: z.number().int().min(1).max(10).default(3),
-    maxPages: z.number().int().min(1).max(200).default(50),
-    resetExisting: z.boolean().default(false).describe('Wipe existing graph data and start fresh'),
-    label: z.string().optional(),
+    'Start an autonomous BFS crawl of a website to build its knowledge graph. ' +
+    'Navigates pages, discovers features, APIs, and workflows, and populates the graph. ' +
+    'Returns immediately with status; use map_site_bfs_status to poll progress.',
+  approvalCategory: 'read',
+  input: z.object({
+    url: z.string().describe('Root URL to start mapping from'),
+    maxDepth: z.number().int().min(1).max(5).default(2).describe('Maximum BFS depth'),
+    maxPages: z.number().int().min(1).max(100).default(20).describe('Maximum pages to visit'),
   }),
-  execute: async ({ url, maxDepth, maxPages, resetExisting }) => {
-    if (resetExisting) resetGraph(url)
-    else initGraph(url)
-
-    _rootUrl = url
-    _maxDepth = maxDepth
-    _maxPages = maxPages
-    _queue.length = 0
-    _visited.clear()
-    bfsEnqueue(url, 0)
-
-    return {
-      ok: true,
-      rootUrl: url,
-      maxDepth,
-      maxPages,
-      graphVersion: getGraph().version,
-      mission: MAP_SITE_PROMPT,
-      bfsState: bfsState(),
-      nextStep: 'Follow MAP_SITE_PROMPT. Start Phase A: inject init scripts, then Phase B loop at: ' + url,
+  async handler(args, ctx, response) {
+    bfsState = {
+      rootUrl: args.url,
+      visited: new Set(),
+      queue: [args.url],
+      maxDepth: args.maxDepth,
+      maxPages: args.maxPages,
+      depthMap: new Map([[args.url, 0]]),
+      status: 'running',
+      startedAt: Date.now(),
     }
+
+    // Add root page node
+    addNode({
+      id: `page:${args.url}`,
+      kind: 'page',
+      label: 'Root',
+      url: args.url,
+      description: 'Entry point',
+    })
+
+    // BFS loop (synchronous steps, bounded)
+    let pagesVisited = 0
+    while (bfsState.queue.length > 0 && pagesVisited < args.maxPages) {
+      const url = bfsState.queue.shift()!
+      if (bfsState.visited.has(url)) continue
+      bfsState.visited.add(url)
+      pagesVisited++
+
+      const depth = bfsState.depthMap.get(url) ?? 0
+
+      try {
+        // Navigate to the page
+        const page = await ctx.browser.newPage()
+        await ctx.browser.navigate(page, url)
+        await new Promise((r) => setTimeout(r, 800))
+
+        // Get page title and links
+        const title = await ctx.browser.evaluate<string>(
+          page,
+          'document.title || document.location.pathname',
+        )
+        const links = await ctx.browser.evaluate<string[]>(
+          page,
+          `Array.from(document.querySelectorAll('a[href]'))
+            .map(a => a.href)
+            .filter(h => h.startsWith('http') && new URL(h).origin === new URL('${args.url}').origin)
+            .slice(0, 20)`,
+        )
+
+        // Update page node with real title
+        addNode({
+          id: `page:${url}`,
+          kind: 'page',
+          label: title ?? url,
+          url,
+          description: `Depth ${depth}`,
+        })
+
+        // Enqueue children
+        if (depth < args.maxDepth && Array.isArray(links)) {
+          for (const link of links) {
+            if (!bfsState.visited.has(link) && !bfsState.queue.includes(link)) {
+              bfsState.queue.push(link)
+              bfsState.depthMap.set(link, depth + 1)
+              addNode({
+                id: `page:${link}`,
+                kind: 'page',
+                label: link,
+                url: link,
+                description: `Depth ${depth + 1}`,
+              })
+              addEdge({
+                from: `page:${url}`,
+                to: `page:${link}`,
+                relation: 'navigates_to',
+              })
+            }
+          }
+        }
+
+        await ctx.browser.closePage(page)
+      } catch (err) {
+        // Non-fatal: skip pages that error
+      }
+    }
+
+    bfsState.status = 'done'
+    const summary = graphSummary()
+    response.text(
+      JSON.stringify({
+        status: 'done',
+        pagesVisited,
+        graph: summary,
+      }, null, 2),
+    )
   },
 })
 
-// ── map_site_bfs_status ───────────────────────────────────────────────────────
-
-export const map_site_bfs_status = tool({
-  description:
-    'Check current BFS crawl queue: pending count, visited count, next 5 URLs. '
-    + 'Call at the start of each per-page loop iteration.',
-  parameters: z.object({}),
-  execute: async () => bfsState(),
+export const map_site_bfs_status = defineTool({
+  name: 'map_site_bfs_status',
+  description: 'Get the current status of an in-progress map_site_start BFS crawl.',
+  approvalCategory: 'read',
+  input: z.object({}),
+  async handler(_args, _ctx, response) {
+    if (!bfsState) {
+      response.text(JSON.stringify({ status: 'idle', message: 'No crawl started yet.' }))
+      return
+    }
+    response.text(
+      JSON.stringify({
+        status: bfsState.status,
+        rootUrl: bfsState.rootUrl,
+        visited: bfsState.visited.size,
+        queued: bfsState.queue.length,
+        elapsedMs: Date.now() - bfsState.startedAt,
+        graph: graphSummary(),
+      }, null, 2),
+    )
+  },
 })
 
-// ── map_site_enqueue ──────────────────────────────────────────────────────────
-
-export const map_site_enqueue = tool({
-  description:
-    'Add URLs to the MapSite BFS crawl queue. '
-    + 'Already-visited or already-queued URLs are silently ignored.',
-  parameters: z.object({
-    urls: z.array(z.string()),
-    depth: z.number().int().min(0).default(1),
-    parentFeatureId: z.string().optional(),
+export const map_site_enqueue = defineTool({
+  name: 'map_site_enqueue',
+  description: 'Manually enqueue a URL into the active BFS crawl queue.',
+  approvalCategory: 'read',
+  input: z.object({
+    url: z.string().describe('URL to add to the crawl queue'),
   }),
-  execute: async ({ urls, depth, parentFeatureId }) => {
-    const before = _queue.length
-    for (const u of urls) bfsEnqueue(u, depth, parentFeatureId)
-    return { added: _queue.length - before, queueLength: _queue.length }
+  async handler(args, _ctx, response) {
+    if (!bfsState || bfsState.status === 'done') {
+      response.text(JSON.stringify({ error: 'No active crawl. Run map_site_start first.' }))
+      return
+    }
+    if (!bfsState.visited.has(args.url) && !bfsState.queue.includes(args.url)) {
+      bfsState.queue.push(args.url)
+      bfsState.depthMap.set(args.url, 0)
+      response.text(JSON.stringify({ queued: true, url: args.url }))
+    } else {
+      response.text(JSON.stringify({ queued: false, reason: 'Already visited or queued.' }))
+    }
   },
 })
