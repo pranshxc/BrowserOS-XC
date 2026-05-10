@@ -74,6 +74,28 @@ import {
 // XC Phase 2 — Element Ref System
 import { ref_click, ref_fill, ref_hover } from './xc/ref-input'
 import { snapshot_with_refs } from './xc/snapshot-with-refs'
+// XC Phase 3 — Storage & Cookie Inspector
+import {
+  list_auth_states,
+  load_auth_state,
+  save_auth_state,
+} from './xc/auth-state'
+import {
+  clear_all_cookies,
+  delete_cookie,
+  get_cookies,
+  import_cookies_from_curl,
+  set_cookie,
+} from './xc/cookies'
+import {
+  clear_local_storage,
+  clear_session_storage,
+  get_local_storage,
+  get_session_storage,
+  set_local_storage,
+  set_session_storage,
+} from './xc/storage'
+import { full_storage_snapshot } from './xc/storage-snapshot'
 
 export const registry = createRegistry([
   // Navigation (8)
@@ -162,4 +184,21 @@ export const registry = createRegistry([
   ref_click,
   ref_fill,
   ref_hover,
+
+  // XC Phase 3 — Storage & Cookie Inspector (15)
+  get_cookies,
+  set_cookie,
+  delete_cookie,
+  clear_all_cookies,
+  import_cookies_from_curl,
+  get_local_storage,
+  set_local_storage,
+  clear_local_storage,
+  get_session_storage,
+  set_session_storage,
+  clear_session_storage,
+  full_storage_snapshot,
+  save_auth_state,
+  load_auth_state,
+  list_auth_states,
 ])
