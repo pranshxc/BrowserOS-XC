@@ -79,14 +79,21 @@ export function registerTools(
       }
     }
 
+    // Pass the Zod schema directly — McpServer.registerTool() accepts ZodObject
+    // natively. Casting to Record<string, never> broke schema serialisation for
+    // tools whose ZodObject shape the SDK could not introspect after the cast.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inputSchema = (tool.input as any).shape
+      ? // ZodObject: pass the .shape so the SDK builds proper JSON Schema
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (tool.input as any).shape
+      : {}
+
     mcpServer.registerTool(
       tool.name,
       {
         description: tool.description,
-        inputSchema: tool.input as unknown as Record<string, never>,
-        ...(tool.output !== undefined && {
-          outputSchema: tool.output as unknown as Record<string, never>,
-        }),
+        inputSchema,
       },
       handler,
     )
