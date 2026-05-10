@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BrowserOS XC — Full Tool Smoke Test
-Usage: python3 scripts/test.py [--base http://localhost:9100/mcp]
+Usage: python3 scripts/test.py [--base http://localhost:9100/mcp] [--verbose]
 Compatible with Python 3.9+
 """
 
@@ -18,12 +18,25 @@ from urllib.parse import urlparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--base", default="http://localhost:9100/mcp")
+parser.add_argument("--verbose", "-v", action="store_true",
+                    help="Print a snippet of each tool's response as proof")
+parser.add_argument("--timeout", type=int, default=30,
+                    help="Default request timeout in seconds (default 30)")
 args = parser.parse_args()
 
 _parsed = urlparse(args.base)
-HOST = _parsed.hostname or "localhost"
-PORT = _parsed.port or 9100
-PATH = _parsed.path or "/mcp"
+HOST    = _parsed.hostname or "localhost"
+PORT    = _parsed.port or 9100
+PATH    = _parsed.path or "/mcp"
+VERBOSE = args.verbose
+TIMEOUT = args.timeout
+
+# Tools that are known to be slow (heap dump, trace, screenshot, etc.)
+SLOW_TOOLS = {
+    "get_heap_snapshot", "start_trace", "stop_trace", "analyze_trace",
+    "take_screenshot", "annotated_screenshot", "diff_url", "diff_screenshot",
+    "map_site_start",
+}
 
 PASS, FAIL, WARN = 0, 0, 0
 RESULTS: list = []
@@ -31,14 +44,29 @@ RESULTS: list = []
 GREEN  = "\033[0;32m"
 RED    = "\033[0;31m"
 YELLOW = "\033[1;33m"
+DIM    = "\033[2m"
 NC     = "\033[0m"
 
 
-def _post(body_dict: dict) -> dict:
-    """POST body_dict as JSON-RPC; returns parsed response dict or error sentinel."""
+def _extract_proof(d: dict) -> str:
+    """Pull a short human-readable snippet from a successful tool response."""
+    try:
+        contents = d["result"]["content"]
+        for item in contents:
+            if item.get("type") == "text":
+                text = item["text"].strip().replace("\n", " ")
+                return text[:120]
+            if item.get("type") == "image":
+                return f"[image {item.get('mimeType','?')} {len(item.get('data',''))} b64 chars]"
+        return repr(d["result"])[:120]
+    except Exception:
+        return repr(d)[:120]
+
+
+def _post(body_dict: dict, timeout: int = TIMEOUT) -> dict:
     body = json.dumps(body_dict).encode()
     try:
-        conn = http.client.HTTPConnection(HOST, PORT, timeout=20)
+        conn = http.client.HTTPConnection(HOST, PORT, timeout=timeout)
         conn.request(
             "POST", PATH, body=body,
             headers={
@@ -53,8 +81,7 @@ def _post(body_dict: dict) -> dict:
     except Exception as e:
         return {"__connection_error__": str(e)}
 
-    # Strip SSE envelope lines ("data: ...", "event: ...", empty lines)
-    json_line = ""
+    # Find the last JSON object line (strips SSE "data: " prefix)
     for line in reversed(raw.splitlines()):
         line = line.strip()
         if not line:
@@ -62,26 +89,26 @@ def _post(body_dict: dict) -> dict:
         if line.startswith("data: "):
             line = line[6:]
         if line.startswith("{"):
-            json_line = line
-            break
+            try:
+                return json.loads(line)
+            except Exception as e:
+                return {"__json_error__": str(e), "__raw__": line[:300]}
 
-    if not json_line:
-        return {"__empty__": True, "__raw__": raw[:300]}
-
-    try:
-        return json.loads(json_line)
-    except Exception as e:
-        return {"__json_error__": str(e), "__raw__": json_line[:300]}
+    return {"__empty__": True, "__raw__": raw[:300]}
 
 
 def call(name: str, tool: str, arguments: dict) -> dict:
     global PASS, FAIL, WARN
+    timeout = 90 if tool in SLOW_TOOLS else TIMEOUT
     d = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-               "params": {"name": tool, "arguments": arguments}})
+               "params": {"name": tool, "arguments": arguments}},
+              timeout=timeout)
 
     if "__connection_error__" in d:
-        print(f"  {RED}FAIL{NC}  {name}  \u2192 connection: {d['__connection_error__']}")
-        FAIL += 1; RESULTS.append(("FAIL", name, d["__connection_error__"])); return d
+        msg = d["__connection_error__"]
+        print(f"  {RED}FAIL{NC}  {name}  \u2192 connection: {msg}")
+        FAIL += 1; RESULTS.append(("FAIL", name, msg)); return d
+
     if "__json_error__" in d or "__empty__" in d:
         raw = d.get("__raw__", "")
         msg = d.get("__json_error__", "empty response")
@@ -94,16 +121,25 @@ def call(name: str, tool: str, arguments: dict) -> dict:
         print(f"  {YELLOW}WARN{NC}  {name}  \u2192 {msg}")
         WARN += 1; RESULTS.append(("WARN", name, msg)); return d
 
-    print(f"  {GREEN}PASS{NC}  {name}")
-    PASS += 1; RESULTS.append(("PASS", name, "")); return d
+    proof = _extract_proof(d)
+    if VERBOSE:
+        print(f"  {GREEN}PASS{NC}  {name}")
+        print(f"        {DIM}{proof}{NC}")
+    else:
+        print(f"  {GREEN}PASS{NC}  {name}  {DIM}({proof[:80]}){NC}")
+    PASS += 1; RESULTS.append(("PASS", name, proof)); return d
 
 
 def list_tools() -> None:
     global PASS, FAIL
     d = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     if "result" in d:
-        n = len(d["result"].get("tools", []))
+        tools = d["result"].get("tools", [])
+        n = len(tools)
+        names = ", ".join(t["name"] for t in tools[:5])
         print(f"  {GREEN}PASS{NC}  tools/list  \u2192 {n} tools registered")
+        if VERBOSE and tools:
+            print(f"        {DIM}First 5: {names}...{NC}")
         PASS += 1
     else:
         print(f"  {RED}FAIL{NC}  tools/list  \u2192 {d}")
@@ -129,7 +165,8 @@ print("")
 print("==================================================")
 print("  BrowserOS XC \u2014 Full Tool Smoke Test")
 print(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print(f"  Endpoint: http://{HOST}:{PORT}{PATH}")
+print(f"  Endpoint: http://{HOST}:{PORT}{PATH}  |  timeout: {TIMEOUT}s")
+print(f"  Mode: {'verbose (with proof snippets)' if VERBOSE else 'compact  (use -v for proof snippets)'}")
 print("==================================================")
 
 section("0. Meta")
@@ -256,7 +293,7 @@ section("16. Phase 14 \u2014 Performance")
 call("start_js_profiler", "start_js_profiler", {"page": P})
 call("stop_js_profiler",  "stop_js_profiler",  {"page": P})
 call("summarize_profile", "summarize_profile", {"page": P})
-call("get_heap_snapshot", "get_heap_snapshot", {"page": P})
+call("get_heap_snapshot", "get_heap_snapshot", {"page": P})  # slow: 90s timeout
 call("start_trace",       "start_trace",       {"page": P})
 call("stop_trace",        "stop_trace",        {"page": P})
 call("analyze_trace",     "analyze_trace",     {"page": P})
@@ -274,7 +311,7 @@ call("graph_export",        "graph_export",        {"format": "json"})
 call("map_site_start",      "map_site_start",      {"page": P, "startUrl": "https://example.com", "maxPages": 1})
 call("map_site_bfs_status", "map_site_bfs_status", {})
 
-# ── Summary ────────────────────────────────────────────────────────────────────
+# ── Summary ─────────────────────────────────────────────────────────────────
 total = PASS + FAIL + WARN
 print("")
 print("==================================================")
