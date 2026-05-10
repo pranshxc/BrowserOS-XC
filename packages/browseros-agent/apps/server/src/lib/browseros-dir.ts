@@ -65,6 +65,11 @@ export function getDbPath(): string {
   return join(getBrowserosDir(), PATHS.DB_DIR_NAME, PATHS.DB_FILE_NAME)
 }
 
+/** Returns the directory where knowledge graph data is persisted. */
+export function getGraphDir(): string {
+  return join(getBrowserosDir(), PATHS.GRAPH_DIR_NAME)
+}
+
 export function getVmCacheDir(): string {
   return join(getCacheDir(), 'vm')
 }
@@ -117,6 +122,7 @@ export async function ensureBrowserosDir(): Promise<void> {
   await ensureDirectory(getSkillsDir())
   await ensureDirectory(getBuiltinSkillsDir())
   await ensureDirectory(getSessionsDir())
+  await ensureDirectory(getGraphDir())
   await ensureDirectory(getLazyMonitoringRunsDir())
   await ensureDirectory(getVmDisksDir())
 }
