@@ -197,18 +197,12 @@ import {
 import {
   clear_local_storage,
   clear_session_storage,
-  get_indexed_db,
   get_local_storage,
   get_session_storage,
-  remove_local_storage,
-  remove_session_storage,
   set_local_storage,
   set_session_storage,
 } from './xc/storage'
-import {
-  restore_storage_snapshot,
-  save_storage_snapshot,
-} from './xc/storage-snapshot'
+import { full_storage_snapshot } from './xc/storage-snapshot'
 
 // ── XC Phase 11 — Cookies & Auth ─────────────────────────────────────────────
 import {
@@ -235,29 +229,28 @@ import {
 // ── XC Phase 13 — Web Workers ─────────────────────────────────────────────────
 import {
   evaluate_in_worker,
+  get_worker_globals,
+  get_worker_source,
   list_web_workers,
-  send_worker_message,
-  terminate_worker,
 } from './xc/web-workers'
 
-// ── XC Phase 14 — Performance ─────────────────────────────────────────────────
+// ── XC Phase 14 — Profiler ────────────────────────────────────────────────────
 import {
-  clear_profiler_data,
-  get_profiler_summary,
-  start_profiler,
-  stop_profiler,
+  get_heap_snapshot,
+  start_js_profiler,
+  stop_js_profiler,
+  summarize_profile,
 } from './xc/profiler'
+
+// ── XC Phase 14 — Trace ───────────────────────────────────────────────────────
 import {
-  clear_trace,
-  export_trace,
+  analyze_trace,
   start_trace,
   stop_trace,
 } from './xc/trace'
-import {
-  get_web_vitals,
-  observe_web_vitals,
-  stop_web_vitals,
-} from './xc/web-vitals'
+
+// ── XC Phase 14 — Web Vitals ──────────────────────────────────────────────────
+import { get_web_vitals } from './xc/web-vitals'
 
 export const registry = createRegistry([
   // Navigation (8)
@@ -445,20 +438,16 @@ export const registry = createRegistry([
   eval_extract_redux,
   eval_extract_i18n,
 
-  // XC Phase 10 — Storage (9)
+  // XC Phase 10 — Storage (6)
   get_local_storage,
   set_local_storage,
-  remove_local_storage,
   clear_local_storage,
   get_session_storage,
   set_session_storage,
-  remove_session_storage,
   clear_session_storage,
-  get_indexed_db,
 
-  // XC Phase 10 — Storage Snapshot (2)
-  save_storage_snapshot,
-  restore_storage_snapshot,
+  // XC Phase 10 — Storage Snapshot (1)
+  full_storage_snapshot,
 
   // XC Phase 11 — Cookies (5)
   get_cookies,
@@ -481,23 +470,20 @@ export const registry = createRegistry([
   // XC Phase 13 — Web Workers (4)
   list_web_workers,
   evaluate_in_worker,
-  send_worker_message,
-  terminate_worker,
+  get_worker_source,
+  get_worker_globals,
 
   // XC Phase 14 — Profiler (4)
-  start_profiler,
-  stop_profiler,
-  get_profiler_summary,
-  clear_profiler_data,
+  start_js_profiler,
+  stop_js_profiler,
+  summarize_profile,
+  get_heap_snapshot,
 
-  // XC Phase 14 — Trace (4)
+  // XC Phase 14 — Trace (3)
   start_trace,
   stop_trace,
-  export_trace,
-  clear_trace,
+  analyze_trace,
 
-  // XC Phase 14 — Web Vitals (3)
+  // XC Phase 14 — Web Vitals (1)
   get_web_vitals,
-  observe_web_vitals,
-  stop_web_vitals,
 ])
