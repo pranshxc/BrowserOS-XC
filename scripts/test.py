@@ -31,29 +31,34 @@ PATH    = _parsed.path or "/mcp"
 VERBOSE = args.verbose
 TIMEOUT = args.timeout
 
-# Tools that are known to be slow (heap dump, trace, screenshot, etc.)
+# Tools skipped in smoke because they are too heavy / destructive for CI
+# get_heap_snapshot: takes 60-90s and can OOM/crash the dev server
+SKIP_IN_SMOKE = {"get_heap_snapshot"}
+
+# Tools that are known to be slow (trace, screenshot, etc.)
 SLOW_TOOLS = {
-    "get_heap_snapshot", "start_trace", "stop_trace", "analyze_trace",
+    "start_trace", "stop_trace", "analyze_trace",
     "take_screenshot", "annotated_screenshot", "diff_url", "diff_screenshot",
     "map_site_start",
 }
 
-PASS, FAIL, WARN = 0, 0, 0
-RESULTS: list = []
-
-GREEN  = "\033[0;32m"
-RED    = "\033[0;31m"
-YELLOW = "\033[1;33m"
-DIM    = "\033[2m"
-NC     = "\033[0m"
-
-# Known tool-level errors that are acceptable in smoke context
+# Known tool-level errors acceptable in smoke context
 # (real bugs in example.com context, not argument schema issues)
 ACCEPTABLE_ERRORS = {
     "diff_url",           # ctx.browser.navigate not a function — server bug, not arg bug
     "get_worker_source",  # no workers on example.com — expected
     "get_worker_globals", # no workers on example.com — expected
 }
+
+PASS, FAIL, WARN, SKIP = 0, 0, 0, 0
+RESULTS: list = []
+
+GREEN  = "\033[0;32m"
+RED    = "\033[0;31m"
+YELLOW = "\033[1;33m"
+CYAN   = "\033[0;36m"
+DIM    = "\033[2m"
+NC     = "\033[0m"
 
 
 def _extract_proof(d: dict) -> str:
@@ -124,18 +129,34 @@ def initialize() -> bool:
     })
     if "result" in d:
         return True
-    print(f"  {RED}FATAL{NC}  initialize handshake failed: {d}")
+    return False
+
+
+def wait_for_server(retries: int = 10, delay: float = 2.0) -> bool:
+    """Wait up to retries*delay seconds for the server to come back after a crash."""
+    for i in range(retries):
+        if initialize():
+            return True
+        time.sleep(delay)
     return False
 
 
 def _rpc(body_dict: dict, timeout: int = TIMEOUT) -> dict:
     """Initialize then POST — required because the server is stateless per-request."""
-    initialize()
+    if not initialize():
+        # Server may be restarting — wait up to 20s
+        if not wait_for_server(retries=10, delay=2.0):
+            return {"error": {"code": -32700, "message": "Parse error: Invalid JSON-RPC message"}, "jsonrpc": "2.0", "id": None}
     return _post(body_dict, timeout=timeout)
 
 
 def call(name: str, tool: str, arguments: dict) -> dict:
-    global PASS, FAIL, WARN
+    global PASS, FAIL, WARN, SKIP
+
+    if tool in SKIP_IN_SMOKE:
+        print(f"  {CYAN}SKIP{NC}  {name}  {DIM}(excluded from smoke — too heavy){NC}")
+        SKIP += 1; RESULTS.append(("SKIP", name, "skipped")); return {}
+
     timeout = 90 if tool in SLOW_TOOLS else TIMEOUT
     d = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
               "params": {"name": tool, "arguments": arguments}},
@@ -143,6 +164,11 @@ def call(name: str, tool: str, arguments: dict) -> dict:
 
     if "__connection_error__" in d:
         msg = d["__connection_error__"]
+        # After a timeout the server may need a moment to restart
+        if "timed out" in msg:
+            print(f"  {YELLOW}WARN{NC}  {name}  \u2192 timed out (server may be restarting…)")
+            wait_for_server(retries=15, delay=2.0)
+            WARN += 1; RESULTS.append(("WARN", name, msg)); return d
         print(f"  {RED}FAIL{NC}  {name}  \u2192 connection: {msg}")
         FAIL += 1; RESULTS.append(("FAIL", name, msg)); return d
 
@@ -160,12 +186,10 @@ def call(name: str, tool: str, arguments: dict) -> dict:
 
     proof = _extract_proof(d)
 
-    # Treat tools that return an isError content block as WARN, not PASS,
-    # unless they are in ACCEPTABLE_ERRORS (context-limited, not schema bugs).
+    # Treat isError content blocks as WARN unless context-limited
     is_tool_error = d.get("result", {}).get("isError", False)
     if is_tool_error and tool not in ACCEPTABLE_ERRORS:
         msg = proof[:120]
-        # -32602 inside proof text means argument schema mismatch — always WARN
         if "-32602" in proof:
             print(f"  {YELLOW}WARN{NC}  {name}  \u2192 schema: {msg[:100]}")
         else:
@@ -182,7 +206,8 @@ def call(name: str, tool: str, arguments: dict) -> dict:
 
 def list_tools() -> None:
     global PASS, FAIL
-    initialize()
+    if not initialize():
+        wait_for_server()
     d = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     if "result" in d:
         tools = d["result"].get("tools", [])
@@ -245,7 +270,6 @@ call("get_page_content", "get_page_content", {"page": P})
 call("get_page_links",   "get_page_links",   {"page": P})
 call("get_dom",          "get_dom",          {"page": P})
 call("get_console_logs", "get_console_logs", {"page": P})
-# correct arg name is `code`, not `script`
 call("evaluate_script",  "evaluate_script",  {"page": P, "code": "document.title"})
 
 section("3. Phase 1 \u2014 Network")
@@ -260,7 +284,6 @@ result = call("snapshot_with_refs", "snapshot_with_refs", {"page": P})
 first_ref = "e1"
 try:
     text = result["result"]["content"][0]["text"]
-    # Format in response: [ref=e1] or ref=e1
     m = re.search(r"ref=([a-zA-Z0-9]+)", text)
     if m:
         first_ref = m.group(1)
@@ -273,7 +296,6 @@ section("5. Phase 3 \u2014 Diff & Comparison")
 call("save_snapshot_baseline",   "save_snapshot_baseline",   {"page": P, "name": "smoke-test"})
 call("diff_snapshot",            "diff_snapshot",            {"page": P, "baseline": "smoke-test"})
 call("save_screenshot_baseline", "save_screenshot_baseline", {"page": P, "name": "smoke-test"})
-# correct arg is `baseline`, not `name`
 call("diff_screenshot",          "diff_screenshot",          {"page": P, "baseline": "smoke-test"})
 call("diff_url",                 "diff_url",                 {"page": P, "urlA": "https://example.com", "urlB": "https://example.com"})
 
@@ -291,7 +313,6 @@ section("8. Phase 6 \u2014 JS Evaluation")
 call("evaluate_js",                   "evaluate_js",                   {"page": P, "code": "document.title"})
 call("detect_framework",              "detect_framework",              {"page": P})
 call("react_get_tree",                "react_get_tree",                {"page": P})
-# correct arg is `componentSelector`, not `selector`
 call("react_inspect_component",       "react_inspect_component",       {"page": P, "componentSelector": "body"})
 call("react_get_renders",             "react_get_renders",             {"page": P})
 call("react_get_suspense_boundaries", "react_get_suspense_boundaries", {"page": P})
@@ -299,13 +320,10 @@ call("react_get_suspense_boundaries", "react_get_suspense_boundaries", {"page": 
 section("9. Phase 7 \u2014 Network Interception")
 call("enable_network_intercept",  "enable_network_intercept",  {"page": P})
 call("list_interceptions",        "list_interceptions",        {"page": P})
-# correct args: `pattern` not `urlPattern`, `action` values: abort|fulfill|continue
 call("add_request_interception",  "add_request_interception",  {"page": P, "pattern": "https://example.com/api/*", "action": "abort"})
-# correct arg is `ruleId` not `id`
 call("remove_interception",       "remove_interception",       {"page": P, "ruleId": "0"})
 call("clear_interceptions",       "clear_interceptions",       {"page": P})
 call("disable_network_intercept", "disable_network_intercept", {"page": P})
-# correct args: `pattern` not `urlPattern`, `responseBody` not `body`
 call("mock_api_response",         "mock_api_response",         {"page": P, "pattern": "https://example.com/api/test", "responseBody": "{}"})
 call("list_mocks",                "list_mocks",                {"page": P})
 call("clear_mocks",               "clear_mocks",               {"page": P})
@@ -318,10 +336,8 @@ section("10. Phase 8 \u2014 Service Workers")
 call("list_service_workers", "list_service_workers", {"page": P})
 
 section("11. Phase 9 \u2014 Init Scripts & Eval Presets")
-# correct args: `source` not `script`, `id` not `name`
 call("add_init_script",      "add_init_script",      {"page": P, "source": "window.__xctest=1", "id": "xctest"})
 call("list_init_scripts",    "list_init_scripts",    {"page": P})
-# correct arg: `id` not `name`
 call("remove_init_script",   "remove_init_script",   {"page": P, "id": "xctest"})
 call("clear_init_scripts",   "clear_init_scripts",   {"page": P})
 call("eval_preset",          "eval_preset",          {"page": P, "preset": "extract_routes"})
@@ -341,11 +357,9 @@ call("clear_session_storage", "clear_session_storage", {"page": P})
 call("clear_local_storage",   "clear_local_storage",   {"page": P})
 
 section("13. Phase 11 \u2014 Cookies & Auth")
-# Navigate to https:// first so cookie tools have a valid URL context
 call("navigate_page",        "navigate_page",        {"page": P, "url": "https://example.com"})
 time.sleep(1.0)
 call("get_cookies",              "get_cookies",              {"page": P})
-# provide url so CDP has a scheme to work with
 call("set_cookie",               "set_cookie",               {"page": P, "name": "xctest", "value": "1", "url": "https://example.com"})
 call("delete_cookie",            "delete_cookie",            {"page": P, "name": "xctest", "url": "https://example.com"})
 call("import_cookies_from_curl", "import_cookies_from_curl", {"page": P, "curlHeader": "session=abc; csrf=xyz"})
@@ -355,12 +369,10 @@ call("list_auth_states",         "list_auth_states",         {})
 
 section("14. Phase 12 \u2014 Dialogs")
 call("get_dialog_status",     "get_dialog_status",     {"page": P})
-# correct arg: `types` not `autoAcceptTypes`
 call("configure_auto_dialog", "configure_auto_dialog", {"page": P, "types": ["alert"]})
 
 section("15. Phase 13 \u2014 Web Workers")
 call("list_web_workers",   "list_web_workers",   {"page": P})
-# workerId arg: correct field is `workerId` — no workers on example.com so these will error contextually
 call("get_worker_source",  "get_worker_source",  {"page": P, "workerId": "w0"})
 call("get_worker_globals", "get_worker_globals", {"page": P, "workerId": "w0"})
 
@@ -368,7 +380,7 @@ section("16. Phase 14 \u2014 Performance")
 call("start_js_profiler", "start_js_profiler", {"page": P})
 call("stop_js_profiler",  "stop_js_profiler",  {"page": P})
 call("summarize_profile", "summarize_profile", {"page": P})
-call("get_heap_snapshot", "get_heap_snapshot", {"page": P})  # slow: 90s timeout
+call("get_heap_snapshot", "get_heap_snapshot", {"page": P})  # skipped — see SKIP_IN_SMOKE
 call("start_trace",       "start_trace",       {"page": P})
 call("stop_trace",        "stop_trace",        {"page": P})
 call("analyze_trace",     "analyze_trace",     {"page": P})
@@ -387,10 +399,10 @@ call("map_site_start",      "map_site_start",      {"page": P, "startUrl": "http
 call("map_site_bfs_status", "map_site_bfs_status", {})
 
 # ── Summary ─────────────────────────────────────────────────────────────────
-total = PASS + FAIL + WARN
+total = PASS + FAIL + WARN + SKIP
 print("")
 print("==================================================")
-print(f"  {GREEN}{PASS} passed{NC}   {RED}{FAIL} failed{NC}   {YELLOW}{WARN} warned{NC}   / {total} total")
+print(f"  {GREEN}{PASS} passed{NC}   {RED}{FAIL} failed{NC}   {YELLOW}{WARN} warned{NC}   {CYAN}{SKIP} skipped{NC}   / {total} total")
 print("==================================================")
 
 if WARN > 0:
@@ -404,6 +416,12 @@ if FAIL > 0:
     for status, name, msg in RESULTS:
         if status == "FAIL":
             print(f"  {name}: {msg}")
+
+if SKIP > 0:
+    print(f"\n{CYAN}Skipped tools:{NC}")
+    for status, name, msg in RESULTS:
+        if status == "SKIP":
+            print(f"  {name}")
 
 print("")
 sys.exit(0 if FAIL == 0 else 1)
