@@ -97,12 +97,41 @@ def _post(body_dict: dict, timeout: int = TIMEOUT) -> dict:
     return {"__empty__": True, "__raw__": raw[:300]}
 
 
+def initialize() -> bool:
+    """
+    Send the MCP `initialize` handshake required by StreamableHTTPServerTransport
+    (MCP SDK 1.26+). Every request is stateless/per-connection on this server,
+    so we must initialize before each tools/list or tools/call.
+    Returns True if the server accepted the handshake.
+    """
+    d = _post({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "smoke-test", "version": "1.0"},
+        },
+    })
+    if "result" in d:
+        return True
+    print(f"  {RED}FATAL{NC}  initialize handshake failed: {d}")
+    return False
+
+
+def _rpc(body_dict: dict, timeout: int = TIMEOUT) -> dict:
+    """Initialize then POST — required because the server is stateless per-request."""
+    initialize()
+    return _post(body_dict, timeout=timeout)
+
+
 def call(name: str, tool: str, arguments: dict) -> dict:
     global PASS, FAIL, WARN
     timeout = 90 if tool in SLOW_TOOLS else TIMEOUT
-    d = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-               "params": {"name": tool, "arguments": arguments}},
-              timeout=timeout)
+    d = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+              "params": {"name": tool, "arguments": arguments}},
+             timeout=timeout)
 
     if "__connection_error__" in d:
         msg = d["__connection_error__"]
@@ -132,6 +161,7 @@ def call(name: str, tool: str, arguments: dict) -> dict:
 
 def list_tools() -> None:
     global PASS, FAIL
+    initialize()
     d = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     if "result" in d:
         tools = d["result"].get("tools", [])
@@ -147,8 +177,8 @@ def list_tools() -> None:
 
 
 def get_page_id() -> int:
-    d = _post({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-               "params": {"name": "list_pages", "arguments": {}}})
+    d = _rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+              "params": {"name": "list_pages", "arguments": {}}})
     try:
         text = d["result"]["content"][0]["text"]
         m = re.search(r"(?:id|page)[:\s]+([0-9]+)", text, re.I) or re.search(r"([0-9]+)", text)
@@ -168,6 +198,13 @@ print(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print(f"  Endpoint: http://{HOST}:{PORT}{PATH}  |  timeout: {TIMEOUT}s")
 print(f"  Mode: {'verbose (with proof snippets)' if VERBOSE else 'compact  (use -v for proof snippets)'}")
 print("==================================================")
+
+# Verify server is reachable and initialize handshake works
+print("")
+if not initialize():
+    print(f"{RED}Server handshake failed — is the server running at http://{HOST}:{PORT}{PATH} ?{NC}")
+    sys.exit(1)
+print(f"  {GREEN}OK{NC}    MCP initialize handshake successful")
 
 section("0. Meta")
 list_tools()
