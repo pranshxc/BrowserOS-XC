@@ -19,6 +19,11 @@ import type { HistoryEntry } from './history'
 import * as history from './history'
 import * as keyboard from './keyboard'
 import * as mouse from './mouse'
+import {
+  NetworkCollector,
+  type GetNetworkRequestsOptions,
+  type GetNetworkRequestsResult,
+} from './network-collector'
 import type { AXNode } from './snapshot'
 import * as snapshot from './snapshot'
 import type { TabGroup } from './tab-groups'
@@ -107,6 +112,8 @@ const ACTIONABLE_SELECTOR = [
 export class Browser {
   private cdp: CdpBackend
   private consoleCollector: ConsoleCollector
+  // XC Phase 1 — NetworkCollector wired alongside ConsoleCollector
+  readonly networkCollector: NetworkCollector
   private pages = new Map<number, PageInfo>()
   private sessions = new Map<string, string>()
   private nextPageId = 1
@@ -114,6 +121,7 @@ export class Browser {
   constructor(cdp: CdpBackend) {
     this.cdp = cdp
     this.consoleCollector = new ConsoleCollector(cdp)
+    this.networkCollector = new NetworkCollector(cdp)
     this.setupEventHandlers()
   }
 
@@ -175,6 +183,7 @@ export class Browser {
 
     this.sessions.set(targetId, sessionId)
     this.consoleCollector.attach(pageId, sessionId)
+    this.networkCollector.attach(pageId, sessionId) // XC Phase 1
 
     return sessionId
   }
@@ -234,6 +243,7 @@ export class Browser {
     for (const [pageId, info] of this.pages) {
       if (!seenTargetIds.has(info.targetId)) {
         this.consoleCollector.detach(pageId)
+        this.networkCollector.detach(pageId) // XC Phase 1
         this.pages.delete(pageId)
       }
     }
@@ -598,6 +608,7 @@ export class Browser {
       )
     await this.cdp.Browser.closeTab({ tabId: info.tabId })
     this.consoleCollector.detach(page)
+    this.networkCollector.detach(page) // XC Phase 1
     this.pages.delete(page)
     this.sessions.delete(info.targetId)
   }
@@ -1653,5 +1664,15 @@ export class Browser {
   ): Promise<GetConsoleLogsResult> {
     await this.resolveSession(page)
     return this.consoleCollector.getLogs(page, opts)
+  }
+
+  // --- XC Phase 1: Network ---
+
+  async getNetworkRequests(
+    page: number,
+    opts?: GetNetworkRequestsOptions,
+  ): Promise<GetNetworkRequestsResult> {
+    await this.resolveSession(page)
+    return this.networkCollector.getRequests(page, opts)
   }
 }
