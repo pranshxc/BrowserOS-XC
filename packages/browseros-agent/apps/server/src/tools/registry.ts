@@ -124,6 +124,15 @@ import {
   save_screenshot_baseline,
 } from './xc/diff-screenshot'
 import { diff_url } from './xc/diff-url'
+// XC Phase 6 — React & Framework Introspection
+import {
+  react_get_renders,
+  react_get_suspense_boundaries,
+  react_get_tree,
+  react_inspect_component,
+} from './xc/react-devtools'
+import { get_web_vitals } from './xc/web-vitals'
+import { detect_framework } from './xc/framework-detect'
 
 export const registry = createRegistry([
   // Navigation (8)
@@ -242,7 +251,7 @@ export const registry = createRegistry([
   snapshot_all_frames,
   snapshot_frame,
 
-  // XC Phase 5 — Visual Intelligence (8)
+  // XC Phase 5 — Visual Intelligence (7)
   annotated_screenshot,
   clear_visual_annotations,
   save_snapshot_baseline,
@@ -250,4 +259,12 @@ export const registry = createRegistry([
   save_screenshot_baseline,
   diff_screenshot,
   diff_url,
+
+  // XC Phase 6 — React & Framework Introspection (6)
+  react_get_tree,
+  react_inspect_component,
+  react_get_renders,
+  react_get_suspense_boundaries,
+  get_web_vitals,
+  detect_framework,
 ])
