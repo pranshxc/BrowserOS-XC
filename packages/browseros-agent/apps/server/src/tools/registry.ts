@@ -179,6 +179,22 @@ import {
   get_worker_source,
   list_web_workers,
 } from './xc/web-workers'
+// XC Phase 9 — JS Execution & Evaluation Engine
+import { evaluate_js, evaluate_js_file } from './xc/eval'
+import {
+  eval_extract_flags,
+  eval_extract_graphql,
+  eval_extract_i18n,
+  eval_extract_redux,
+  eval_extract_routes,
+  eval_preset,
+} from './xc/eval-presets'
+import {
+  add_init_script,
+  clear_init_scripts,
+  list_init_scripts,
+  remove_init_script,
+} from './xc/init-scripts'
 
 export const registry = createRegistry([
   // Navigation (8)
@@ -351,4 +367,18 @@ export const registry = createRegistry([
   evaluate_in_worker,
   get_worker_source,
   get_worker_globals,
+
+  // XC Phase 9 — JS Execution & Evaluation Engine (13)
+  evaluate_js,
+  evaluate_js_file,
+  eval_preset,
+  eval_extract_routes,
+  eval_extract_flags,
+  eval_extract_graphql,
+  eval_extract_redux,
+  eval_extract_i18n,
+  add_init_script,
+  remove_init_script,
+  list_init_scripts,
+  clear_init_scripts,
 ])
