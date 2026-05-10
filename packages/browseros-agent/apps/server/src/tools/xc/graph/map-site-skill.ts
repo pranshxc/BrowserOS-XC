@@ -24,7 +24,7 @@ export const map_site_start = defineTool({
   description:
     'Start an autonomous BFS crawl of a website to build its knowledge graph. ' +
     'Navigates pages, discovers features, APIs, and workflows, and populates the graph. ' +
-    'Returns immediately with status; use map_site_bfs_status to poll progress.',
+    'Call graph_export or graph_summary after completion to inspect results.',
   approvalCategory: 'read',
   input: z.object({
     url: z.string().describe('Root URL to start mapping from'),
@@ -32,6 +32,10 @@ export const map_site_start = defineTool({
     maxPages: z.number().int().min(1).max(100).default(20).describe('Maximum pages to visit'),
   }),
   async handler(args, ctx, response) {
+    const origin = (() => {
+      try { return new URL(args.url).origin } catch { return args.url }
+    })()
+
     bfsState = {
       rootUrl: args.url,
       visited: new Set(),
@@ -43,7 +47,6 @@ export const map_site_start = defineTool({
       startedAt: Date.now(),
     }
 
-    // Add root page node
     addNode({
       id: `page:${args.url}`,
       kind: 'page',
@@ -52,8 +55,8 @@ export const map_site_start = defineTool({
       description: 'Entry point',
     })
 
-    // BFS loop (synchronous steps, bounded)
     let pagesVisited = 0
+
     while (bfsState.queue.length > 0 && pagesVisited < args.maxPages) {
       const url = bfsState.queue.shift()!
       if (bfsState.visited.has(url)) continue
@@ -62,37 +65,38 @@ export const map_site_start = defineTool({
 
       const depth = bfsState.depthMap.get(url) ?? 0
 
+      let pageId: number | undefined
       try {
-        // Navigate to the page
-        const page = await ctx.browser.newPage()
-        await ctx.browser.navigate(page, url)
-        await new Promise((r) => setTimeout(r, 800))
+        // Open a hidden background tab so the user's active tab is not disturbed
+        pageId = await ctx.browser.newPage(url, { background: true })
+        await ctx.browser.goto(pageId, url)
 
-        // Get page title and links
-        const title = await ctx.browser.evaluate<string>(
-          page,
+        // Get title via evaluate (returns { value?, error? })
+        const titleResult = await ctx.browser.evaluate(
+          pageId,
           'document.title || document.location.pathname',
         )
-        const links = await ctx.browser.evaluate<string[]>(
-          page,
-          `Array.from(document.querySelectorAll('a[href]'))
-            .map(a => a.href)
-            .filter(h => h.startsWith('http') && new URL(h).origin === new URL('${args.url}').origin)
-            .slice(0, 20)`,
-        )
+        const title = typeof titleResult.value === 'string' ? titleResult.value : url
 
-        // Update page node with real title
+        // Use built-in getPageLinks which walks the AX tree properly
+        const links = await ctx.browser.getPageLinks(pageId)
+        const sameSiteLinks = links
+          .map((l) => l.href)
+          .filter((h) => {
+            try { return new URL(h).origin === origin } catch { return false }
+          })
+
+        // Upsert page node with resolved title
         addNode({
           id: `page:${url}`,
           kind: 'page',
-          label: title ?? url,
+          label: title,
           url,
           description: `Depth ${depth}`,
         })
 
-        // Enqueue children
-        if (depth < args.maxDepth && Array.isArray(links)) {
-          for (const link of links) {
+        if (depth < args.maxDepth) {
+          for (const link of sameSiteLinks) {
             if (!bfsState.visited.has(link) && !bfsState.queue.includes(link)) {
               bfsState.queue.push(link)
               bfsState.depthMap.set(link, depth + 1)
@@ -101,7 +105,7 @@ export const map_site_start = defineTool({
                 kind: 'page',
                 label: link,
                 url: link,
-                description: `Depth ${depth + 1}`,
+                description: `Depth ${depth + 1} (queued)`,
               })
               addEdge({
                 from: `page:${url}`,
@@ -111,10 +115,12 @@ export const map_site_start = defineTool({
             }
           }
         }
-
-        await ctx.browser.closePage(page)
-      } catch (err) {
-        // Non-fatal: skip pages that error
+      } catch {
+        // Non-fatal: skip pages that error (cross-origin, auth-wall, etc.)
+      } finally {
+        if (pageId !== undefined) {
+          try { await ctx.browser.closePage(pageId) } catch { /* ignore */ }
+        }
       }
     }
 
