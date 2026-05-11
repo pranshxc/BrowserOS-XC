@@ -6,15 +6,16 @@ export const graph_reset = defineTool({
   name: 'graph_reset',
   description: [
     'Clear the active in-memory graph session index.',
-    'This does NOT delete any files on disk — all data at ~/.browseros/graphs/ is preserved.',
+    'This does NOT delete any files on disk -- all data at ~/.browseros/graphs/ is preserved.',
     'Use this to start fresh without loading a previous session.',
     'After reset, the next graph_add_node call will create a new session automatically.',
+    'REQUIRED: confirm must be true (boolean) to proceed.',
   ].join(' '),
   approvalCategory: 'filesystem_write',
   input: z.object({
     confirm: z
-      .boolean()
-      .describe('Must be true to confirm the reset. Set to true to proceed.'),
+      .coerce.boolean()
+      .describe('Must be true to confirm the reset. Pass true (boolean) to proceed.'),
   }),
   handler: async (args, _ctx, response) => {
     const { confirm } = args as { confirm: boolean }
@@ -28,7 +29,7 @@ export const graph_reset = defineTool({
 
     response.text(
       [
-        `✅ Active graph session cleared.`,
+        `Active graph session cleared.`,
         `All disk files are preserved at ~/.browseros/graphs/`,
         `Use graph_list to see them. Use graph_load to restore one.`,
         `The next graph_add_node will start a fresh session.`,

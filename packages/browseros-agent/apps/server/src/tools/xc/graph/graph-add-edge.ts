@@ -19,19 +19,19 @@ export const graph_add_edge = defineTool({
     'Use node IDs returned by graph_add_node.',
     'Edge is written immediately to disk. Returns file paths.',
     'Does NOT return the full graph.',
+    'REQUIRED: from (string node ID), to (string node ID). OPTIONAL: type (default: navigates_to), meta (object), session_id.',
   ].join(' '),
   approvalCategory: 'filesystem_write',
   input: z.object({
     from: z.string().describe('Source node ID (returned by graph_add_node)'),
     to: z.string().describe('Target node ID (returned by graph_add_node)'),
     type: z.enum(EDGE_TYPES).default('navigates_to').describe(
-      'Edge type: navigates_to | uses_flag | calls_api | reads_state | renders | related | generic',
+      'Edge type: navigates_to | uses_flag | calls_api | reads_state | renders | related | generic. Default: navigates_to',
     ),
     meta: z
       .record(z.unknown())
-      .optional()
       .default({})
-      .describe('Optional metadata for this edge'),
+      .describe('Optional metadata for this edge. Default: {}'),
     session_id: z.string().optional().describe(
       'Session ID. Omit to use active session.',
     ),
@@ -49,7 +49,7 @@ export const graph_add_edge = defineTool({
 
     response.text(
       [
-        `✅ Edge added`,
+        `Edge added`,
         `  ${from} --[${type}]--> ${to}`,
         `  session   : ${result.sessionId}`,
         `  home_path : ${result.homePath}`,

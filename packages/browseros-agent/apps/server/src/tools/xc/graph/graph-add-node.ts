@@ -1,7 +1,6 @@
 import { defineTool } from '../../framework'
 import {
   addNode,
-  getActiveSessionId,
   type NodeType,
 } from './store'
 import { z } from 'zod'
@@ -21,9 +20,10 @@ export const graph_add_node = defineTool({
   description: [
     'Add a node to the knowledge graph.',
     'Each node represents a discovered entity: a page URL, feature flag, GraphQL API, Redux slice, route, or component.',
-    'Nodes are written immediately to disk at ~/.browseros/graphs/ AND ./graphs/ — never lost.',
+    'Nodes are written immediately to disk at ~/.browseros/graphs/ AND ./graphs/ -- never lost.',
     'Returns the node ID and file paths. Does NOT return the full graph (use graph_summary or graph_query for that).',
     'If no session is active, a new one is created automatically.',
+    'REQUIRED: label (string). OPTIONAL: type (default: page), meta (object), session_id (string).',
   ].join(' '),
   approvalCategory: 'filesystem_write',
   input: z.object({
@@ -31,13 +31,12 @@ export const graph_add_node = defineTool({
       'Human-readable label for the node, e.g. a URL, flag name, API name, or Redux slice name.',
     ),
     type: z.enum(NODE_TYPES).default('page').describe(
-      'Node type: page | feature_flag | graphql_api | redux_slice | route | component | generic',
+      'Node type: page | feature_flag | graphql_api | redux_slice | route | component | generic. Default: page',
     ),
     meta: z
       .record(z.unknown())
-      .optional()
       .default({})
-      .describe('Optional metadata key/value pairs, e.g. { method: "GET", domain: "twilio.com" }'),
+      .describe('Optional metadata key/value pairs, e.g. { method: "GET", domain: "twilio.com" }. Default: {}'),
     session_id: z.string().optional().describe(
       'Session ID to write to. Omit to use the active session (auto-created if none exists).',
     ),
@@ -54,7 +53,7 @@ export const graph_add_node = defineTool({
 
     response.text(
       [
-        `✅ Node added`,
+        `Node added`,
         `  node_id   : ${result.nodeId}`,
         `  type      : ${type}`,
         `  session   : ${result.sessionId}`,

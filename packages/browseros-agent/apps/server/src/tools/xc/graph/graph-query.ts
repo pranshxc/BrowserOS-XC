@@ -10,6 +10,7 @@ export const graph_query = defineTool({
     'Results are paginated (default 50 per page) to prevent LLM context overflow.',
     'Filter by kind (node|edge) and/or type (e.g. page, feature_flag, navigates_to).',
     'Use hasMore + page parameter to iterate through all results.',
+    'IMPORTANT: page and page_size must be numbers (e.g. 1, 50). Omit them to use defaults.',
   ].join(' '),
   approvalCategory: 'read',
   input: z.object({
@@ -21,9 +22,9 @@ export const graph_query = defineTool({
       .describe(
         'Filter by node type (page, feature_flag, graphql_api, redux_slice, route, component, generic) or edge type (navigates_to, uses_flag, calls_api, reads_state, renders, related, generic).',
       ),
-    page: z.number().int().min(1).default(1).describe('Page number (1-based).'),
-    page_size: z.number().int().min(1).max(100).default(50).describe(
-      'Items per page (max 100). Keep low to avoid context overflow.',
+    page: z.coerce.number().int().min(1).default(1).describe('Page number (1-based). Default: 1'),
+    page_size: z.coerce.number().int().min(1).max(100).default(50).describe(
+      'Items per page (max 100). Default: 50. Keep low to avoid context overflow.',
     ),
   }),
   handler: async (args, _ctx, response) => {
@@ -43,7 +44,7 @@ export const graph_query = defineTool({
     )
 
     const lines: string[] = [
-      `📋 Graph Query Results`,
+      `Graph Query Results`,
       `  total   : ${result.total}`,
       `  page    : ${result.page} / ${Math.ceil(result.total / result.pageSize) || 1}`,
       `  showing : ${result.items.length} items`,
@@ -66,7 +67,7 @@ export const graph_query = defineTool({
     }
 
     if (result.hasMore) {
-      lines.push(``, `  → Call graph_query with page=${result.page + 1} to get the next page.`)
+      lines.push(``, `  Call graph_query with page=${result.page + 1} to get the next page.`)
     }
 
     response.text(lines.join('\n'))
