@@ -108,7 +108,7 @@ export const full_storage_snapshot = defineXcTool({
     lines.push(`=== Cookies (${cookies.length}) ===`)
     for (const c of cookies) {
       lines.push(
-        `  ${c.name}=${trunc(c.value)} [domain=${c.domain ?? '"'"''"'"'} httpOnly=${c.httpOnly ?? false} secure=${c.secure ?? false}]`,
+        `  ${c.name}=${trunc(c.value)} [domain=${c.domain ?? ''} httpOnly=${c.httpOnly ?? false} secure=${c.secure ?? false}]`,
       )
     }
 
