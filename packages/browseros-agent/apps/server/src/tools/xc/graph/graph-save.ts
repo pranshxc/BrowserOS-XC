@@ -17,7 +17,7 @@ export const graph_save = defineTool({
   description: [
     'Save all graph formats to disk right now: .ndjson (append log) + .json (full export) + .mmd (Mermaid diagram).',
     'Call this after manually adding nodes/edges with graph_add_node or graph_add_page to ensure everything is persisted.',
-    'Files are saved to BOTH ~/.browseros/graphs/ AND ./graphs/ (current working directory).',
+    'Files are saved to BOTH $HOME/$browserosRoot/graphs/ AND ./graphs/ (current working directory).',
     'Returns all 6 file paths (home + cwd for each format).',
     'No data is truncated — the full graph is written in every format.',
     'Use graph_read afterwards to read back and verify the saved contents.',
