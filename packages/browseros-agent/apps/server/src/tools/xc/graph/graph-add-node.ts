@@ -6,7 +6,21 @@ import {
 import { z } from 'zod'
 
 const NODE_TYPES: [NodeType, ...NodeType[]] = [
+  // Phase 11 semantic types
   'page',
+  'form',
+  'field',
+  'action',
+  'api_call',
+  'popup',
+  'nav_region',
+  'content_block',
+  'error_state',
+  'auth_gate',
+  'js_bundle',
+  'local_storage',
+  'schema_org',
+  // Legacy types (preserved)
   'feature_flag',
   'graphql_api',
   'redux_slice',
@@ -18,25 +32,29 @@ const NODE_TYPES: [NodeType, ...NodeType[]] = [
 export const graph_add_node = defineTool({
   name: 'graph_add_node',
   description: [
-    'Add a node to the knowledge graph.',
-    'Each node represents a discovered entity: a page URL, feature flag, GraphQL API, Redux slice, route, or component.',
+    'Add a semantic node to the knowledge graph.',
+    'Node types: page (URL/route), form (<form> element), field (<input>/<select>/<textarea>),',
+    'action (button/CTA/JS trigger), api_call (network request), popup (modal/dialog/tooltip),',
+    'nav_region (ARIA landmark), content_block (heading+body section), error_state (validation failure),',
+    'auth_gate (requires auth), js_bundle (framework/feature flags), local_storage (client-side key),',
+    'schema_org (JSON-LD block).',
+    'Also supports legacy types: feature_flag, graphql_api, redux_slice, route, component, generic.',
     'Nodes are written immediately to disk at ~/.browseros/graphs/ AND ./graphs/ -- never lost.',
-    'Returns the node ID and file paths. Does NOT return the full graph (use graph_summary or graph_query for that).',
-    'If no session is active, a new one is created automatically.',
+    'Returns the node ID and file paths.',
     'REQUIRED: label (string). OPTIONAL: type (default: page), meta (object), session_id (string).',
   ].join(' '),
   approvalCategory: 'filesystem_write',
   input: z.object({
     label: z.string().describe(
-      'Human-readable label for the node, e.g. a URL, flag name, API name, or Redux slice name.',
+      'Human-readable label for the node, e.g. a URL, form name, field label, button text, or API endpoint.',
     ),
     type: z.enum(NODE_TYPES).default('page').describe(
-      'Node type: page | feature_flag | graphql_api | redux_slice | route | component | generic. Default: page',
+      'Node type. Default: page. See description for full list.',
     ),
     meta: z
       .record(z.unknown())
       .default({})
-      .describe('Optional metadata key/value pairs, e.g. { method: "GET", domain: "twilio.com" }. Default: {}'),
+      .describe('Optional metadata, e.g. { url, pageRole, inputType, method, endpoint }. Default: {}'),
     session_id: z.string().optional().describe(
       'Session ID to write to. Omit to use the active session (auto-created if none exists).',
     ),

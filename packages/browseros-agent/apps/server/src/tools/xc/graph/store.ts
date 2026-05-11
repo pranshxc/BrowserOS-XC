@@ -17,16 +17,51 @@
  *   Each line is either a node record or an edge record.
  *   {"kind":"node", "id":"...", "type":"...", "label":"...", "meta":{...}, "ts":...}
  *   {"kind":"edge", "from":"...", "to":"...", "type":"...", "meta":{...}, "ts":...}
+ *
+ * JSON export structure (exportGraph) produces a HIERARCHICAL tree:
+ *   {
+ *     sessionId, exportedAt, nodeCount, edgeCount,
+ *     pages: {
+ *       "page:login": {
+ *         ...pageNode,
+ *         forms: { "form:login:0": { ...formNode, fields: [...], api_calls: [...] } },
+ *         actions: [ ...actionNodes ],
+ *         popups: [ ...popupNodes ],
+ *         nav_regions: [ ...navRegionNodes ],
+ *         js_bundles: [ ...jsBundleNodes ],
+ *         local_storage: [ ...localStorageNodes ],
+ *         schema_org: [ ...schemaDotOrgNodes ],
+ *         api_calls: [ ...apiCallNodes triggered at page level ],
+ *       }
+ *     },
+ *     orphans: [ ...nodes not attached to any page ],
+ *     edges: [ ...all edges ]
+ *   }
  */
 
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Types ─────────────────────────────────────────────────────────────────────────────
 
+// Semantic types (Phase 11) + legacy types preserved for backwards compatibility
 export type NodeType =
-  | 'page'
+  // ── Phase 11 semantic types ──
+  | 'page'          // A URL / route visited
+  | 'form'          // A <form> element
+  | 'field'         // An <input>, <select>, <textarea>
+  | 'action'        // A button, CTA, or JS-triggered element
+  | 'api_call'      // A network request intercepted or inferred
+  | 'popup'         // A modal, dialog, sheet, tooltip, dropdown
+  | 'nav_region'    // ARIA landmark zone (navigation, banner, main, footer)
+  | 'content_block' // A named content section (H2/H3 heading + body)
+  | 'error_state'   // A validation error or failure state
+  | 'auth_gate'     // A page/resource requiring authentication
+  | 'js_bundle'     // Detected JS framework / global objects / feature flags
+  | 'local_storage' // A key in localStorage or sessionStorage
+  | 'schema_org'    // A JSON-LD schema.org block
+  // ── Legacy types (preserved for backwards compatibility) ──
   | 'feature_flag'
   | 'graphql_api'
   | 'redux_slice'
@@ -35,7 +70,16 @@ export type NodeType =
   | 'generic'
 
 export type EdgeType =
-  | 'navigates_to'
+  // ── Phase 11 semantic edges ──
+  | 'navigates_to'       // page → page
+  | 'contains'           // page → form, form → field, page → popup, page → nav_region
+  | 'submits_to'         // form → api_call
+  | 'triggers'           // action → api_call, action → popup
+  | 'validates_via'      // field → api_call (live validation)
+  | 'redirects_to'       // page → page (HTTP 30x or JS redirect)
+  | 'authenticates_with' // page → api_call (login flow)
+  | 'auth_gate'          // page → auth_gate
+  // ── Legacy edges (preserved) ──
   | 'uses_flag'
   | 'calls_api'
   | 'reads_state'
@@ -94,7 +138,7 @@ export interface SaveAllResult {
   edgeCount: number
 }
 
-// ─── Session state (minimal in-memory index only) ────────────────────────────
+// ─── Session state (minimal in-memory index only) ────────────────────────────────────────
 
 interface SessionIndex {
   sessionId: string
@@ -112,7 +156,7 @@ interface SessionIndex {
 const sessions = new Map<string, SessionIndex>()
 let activeSessionId: string | null = null
 
-// ─── Path helpers ────────────────────────────────────────────────────────────
+// ─── Path helpers ────────────────────────────────────────────────────────────────────
 
 function getHomeGraphsDir(): string {
   return join(homedir(), '.browseros', 'graphs')
@@ -138,7 +182,7 @@ function sessionMmdFileName(sessionId: string): string {
   return `${sessionId}.mmd`
 }
 
-// ─── Session management ──────────────────────────────────────────────────────
+// ─── Session management ────────────────────────────────────────────────────────────
 
 export function generateSessionId(): string {
   const now = new Date()
@@ -149,7 +193,7 @@ export function generateSessionId(): string {
     '-',
     String(now.getHours()).padStart(2, '0'),
     String(now.getMinutes()).padStart(2, '0'),
-    String(now.getSeconds()).padStart(2, '0'),
+    String(now.getSeconds()).padStart(2, '00'),
   ].join('')
   const rand = Math.random().toString(36).slice(2, 7)
   return `graph-${ts}-${rand}`
@@ -194,11 +238,10 @@ export function setActiveSession(sessionId: string): void {
   activeSessionId = sessionId
 }
 
-// ─── Write helpers ────────────────────────────────────────────────────────────
+// ─── Write helpers ───────────────────────────────────────────────────────────────────
 
 async function appendRecord(index: SessionIndex, record: GraphRecord): Promise<void> {
   const line = `${JSON.stringify(record)}\n`
-  // Write to both paths concurrently; never fail the mutation if one write fails
   await Promise.allSettled([
     appendFile(index.homePath, line, 'utf-8'),
     appendFile(index.cwdPath, line, 'utf-8'),
@@ -206,7 +249,7 @@ async function appendRecord(index: SessionIndex, record: GraphRecord): Promise<v
   index.updatedAt = Date.now()
 }
 
-// ─── Node operations ─────────────────────────────────────────────────────────
+// ─── Node operations ─────────────────────────────────────────────────────────────────
 
 export async function addNode(
   label: string,
@@ -243,7 +286,7 @@ export async function addNode(
   }
 }
 
-// ─── Edge operations ─────────────────────────────────────────────────────────
+// ─── Edge operations ─────────────────────────────────────────────────────────────────
 
 export async function addEdge(
   from: string,
@@ -274,7 +317,7 @@ export async function addEdge(
   }
 }
 
-// ─── Summary (safe for LLM context) ──────────────────────────────────────────
+// ─── Summary (safe for LLM context) ──────────────────────────────────────────────────
 
 export async function getSessionSummary(sessionId?: string): Promise<GraphSummary> {
   const id = sessionId ?? activeSessionId
@@ -299,7 +342,7 @@ export async function getSessionSummary(sessionId?: string): Promise<GraphSummar
   }
 }
 
-// ─── Paginated query (safe for LLM context) ──────────────────────────────────
+// ─── Paginated query (safe for LLM context) ─────────────────────────────────────────
 
 export async function queryGraph(
   sessionId?: string,
@@ -317,7 +360,6 @@ export async function queryGraph(
   }
   const index = sessions.get(id)!
 
-  // Read from disk (source of truth)
   let raw: string
   try {
     raw = await readFile(index.homePath, 'utf-8')
@@ -352,7 +394,7 @@ export async function queryGraph(
   }
 }
 
-// ─── Internal: read all records from disk ────────────────────────────────────
+// ─── Internal: read all records from disk ─────────────────────────────────────────────
 
 async function readAllRecords(
   index: SessionIndex,
@@ -378,7 +420,30 @@ async function readAllRecords(
   return { nodes, edges }
 }
 
-// ─── Export full graph to JSON file ──────────────────────────────────────────
+// ─── Export full graph to hierarchical tree JSON ───────────────────────────────────────
+//
+// Produces a page-rooted tree:
+//   pages: {
+//     "page:login": {
+//       id, type, label, meta: { url, title, pageRole, ... },
+//       forms: {
+//         "form:login:0": {
+//           id, label, meta: { action, method, purpose, ... },
+//           fields: [ { id, label, meta: { inputType, required, ... } }, ... ],
+//           api_calls: [ { id, label, meta: { method, endpoint, ... } } ]
+//         }
+//       },
+//       actions: [ { id, label, meta: { triggerType, href, ... } }, ... ],
+//       popups:  [ { id, label, meta: { role, ... } }, ... ],
+//       nav_regions: [ ... ],
+//       js_bundles:  [ ... ],
+//       local_storage: [ ... ],
+//       schema_org:  [ ... ],
+//       api_calls:   [ ...page-level api calls ]
+//     }
+//   },
+//   orphans: [ ...nodes not attached to any page ],
+//   edges: [ ...all edges, with inline from/to/type/meta ]
 
 export async function exportGraph(sessionId?: string): Promise<{
   homeJsonPath: string
@@ -396,18 +461,129 @@ export async function exportGraph(sessionId?: string): Promise<{
 
   const { nodes, edges } = await readAllRecords(index)
 
-  // Deduplicate nodes by ID (last write wins for label/meta)
+  // Deduplicate nodes by ID (last write wins)
   const nodeMap = new Map<string, GraphNode>()
   for (const n of nodes) nodeMap.set(n.id, n)
-  const dedupedNodes = [...nodeMap.values()]
+
+  // Build parent→children index from 'contains' edges
+  // Edge: { from: parentId, to: childId, type: 'contains' }
+  const childrenOf = new Map<string, string[]>()
+  // Also track form→field/api_call relationships
+  const formChildren = new Map<string, string[]>()
+
+  for (const edge of edges) {
+    if (edge.type === 'contains' || edge.type === 'submits_to' || edge.type === 'triggers') {
+      const parent = edge.from
+      const child = edge.to
+      if (!childrenOf.has(parent)) childrenOf.set(parent, [])
+      childrenOf.get(parent)!.push(child)
+    }
+  }
+
+  // Collect page nodes
+  const pageNodes = [...nodeMap.values()].filter(n => n.type === 'page')
+
+  // Build page tree
+  const pagesTree: Record<string, unknown> = {}
+
+  for (const page of pageNodes) {
+    const pageChildIds = childrenOf.get(page.id) ?? []
+
+    const forms: Record<string, unknown> = {}
+    const actions: unknown[] = []
+    const popups: unknown[] = []
+    const navRegions: unknown[] = []
+    const jsBundles: unknown[] = []
+    const localStorage: unknown[] = []
+    const schemaOrg: unknown[] = []
+    const apiCalls: unknown[] = []
+
+    for (const childId of pageChildIds) {
+      const child = nodeMap.get(childId)
+      if (!child) continue
+
+      switch (child.type) {
+        case 'form': {
+          // Build form subtree with its fields + api_calls
+          const formChildIds = childrenOf.get(child.id) ?? []
+          const fields: unknown[] = []
+          const formApiCalls: unknown[] = []
+
+          for (const fcId of formChildIds) {
+            const fc = nodeMap.get(fcId)
+            if (!fc) continue
+            if (fc.type === 'field') {
+              fields.push({ id: fc.id, label: fc.label, meta: fc.meta })
+            } else if (fc.type === 'api_call') {
+              formApiCalls.push({ id: fc.id, label: fc.label, meta: fc.meta })
+            }
+          }
+
+          forms[child.id] = {
+            id: child.id,
+            label: child.label,
+            meta: child.meta,
+            fields,
+            api_calls: formApiCalls,
+          }
+          break
+        }
+        case 'action':
+          actions.push({ id: child.id, label: child.label, meta: child.meta })
+          break
+        case 'popup':
+          popups.push({ id: child.id, label: child.label, meta: child.meta })
+          break
+        case 'nav_region':
+          navRegions.push({ id: child.id, label: child.label, meta: child.meta })
+          break
+        case 'js_bundle':
+          jsBundles.push({ id: child.id, label: child.label, meta: child.meta })
+          break
+        case 'local_storage':
+          localStorage.push({ id: child.id, label: child.label, meta: child.meta })
+          break
+        case 'schema_org':
+          schemaOrg.push({ id: child.id, label: child.label, meta: child.meta })
+          break
+        case 'api_call':
+          apiCalls.push({ id: child.id, label: child.label, meta: child.meta })
+          break
+      }
+    }
+
+    pagesTree[page.id] = {
+      id: page.id,
+      label: page.label,
+      meta: page.meta,
+      forms,
+      actions,
+      popups,
+      nav_regions: navRegions,
+      js_bundles: jsBundles,
+      local_storage: localStorage,
+      schema_org: schemaOrg,
+      api_calls: apiCalls,
+    }
+  }
+
+  // Collect orphan nodes (not a page, not a child of any page)
+  const allChildIds = new Set<string>()
+  for (const [, children] of childrenOf) {
+    for (const c of children) allChildIds.add(c)
+  }
+  const orphans = [...nodeMap.values()].filter(
+    n => n.type !== 'page' && !allChildIds.has(n.id)
+  ).map(n => ({ id: n.id, type: n.type, label: n.label, meta: n.meta }))
 
   const output = {
     sessionId: id,
     exportedAt: new Date().toISOString(),
-    nodeCount: dedupedNodes.length,
+    nodeCount: nodeMap.size,
     edgeCount: edges.length,
-    nodes: dedupedNodes,
-    edges,
+    pages: pagesTree,
+    orphans,
+    edges: edges.map(e => ({ from: e.from, to: e.to, type: e.type, meta: e.meta })),
   }
 
   const json = `${JSON.stringify(output, null, 2)}\n`
@@ -419,10 +595,10 @@ export async function exportGraph(sessionId?: string): Promise<{
     writeFile(cwdJsonPath, json, 'utf-8'),
   ])
 
-  return { homeJsonPath, cwdJsonPath, nodeCount: dedupedNodes.length, edgeCount: edges.length }
+  return { homeJsonPath, cwdJsonPath, nodeCount: nodeMap.size, edgeCount: edges.length }
 }
 
-// ─── Mermaid export ───────────────────────────────────────────────────────────
+// ─── Mermaid export ──────────────────────────────────────────────────────────────────────
 
 export async function exportMermaid(
   sessionId?: string,
@@ -444,37 +620,64 @@ export async function exportMermaid(
 
   const { nodes, edges } = await readAllRecords(index)
 
-  // Build a deduplicated node map (last write wins for label)
   const nodeMap = new Map<string, GraphNode>()
   for (const n of nodes) nodeMap.set(n.id, n)
 
   const lines: string[] = [`flowchart ${direction}`]
 
   // Node type → Mermaid shape
-  const shapeOpen: Record<NodeType, string> = {
-    page: '[',
-    feature_flag: '[/',
-    graphql_api: '([',
-    redux_slice: '[(',
-    route: '>',
-    component: '{{',
-    generic: '[',
+  // Shapes: [ ] = rectangle (page), ([ ]) = stadium (field/api_call),
+  //         { } = rhombus (action), [/ /] = parallelogram (flag),
+  //         (( )) = circle (popup), [[ ]] = subroutine (form),
+  //         > ] = asymmetric (route), {{ }} = hexagon (component)
+  const shapeOpen: Record<string, string> = {
+    // Phase 11 semantic
+    page:          '[',
+    form:          '[[',
+    field:         '([',
+    action:        '{',
+    api_call:      '((',
+    popup:         '{',
+    nav_region:    '[/',
+    content_block: '[',
+    error_state:   '[',
+    auth_gate:     '>',
+    js_bundle:     '{{',
+    local_storage: '[(',
+    schema_org:    '[/',
+    // Legacy
+    feature_flag:  '[/',
+    graphql_api:   '((',
+    redux_slice:   '[(',
+    route:         '>',
+    component:     '{{',
+    generic:       '[',
   }
-  const shapeClose: Record<NodeType, string> = {
-    page: ']',
-    feature_flag: '/]',
-    graphql_api: ')]',
-    redux_slice: ')]',
-    route: ']',
-    component: '}}',
-    generic: ']',
+  const shapeClose: Record<string, string> = {
+    page:          ']',
+    form:          ']]',
+    field:         ')]',
+    action:        '}',
+    api_call:      '))',
+    popup:         '}',
+    nav_region:    '/]',
+    content_block: ']',
+    error_state:   ']',
+    auth_gate:     ']',
+    js_bundle:     '}}',
+    local_storage: ')]',
+    schema_org:    '/]',
+    feature_flag:  '/]',
+    graphql_api:   '))',
+    redux_slice:   ')]',
+    route:         ']',
+    component:     '}}',
+    generic:       ']',
   }
 
-  // Sanitise label for Mermaid (no quotes, max 60 chars) — full label in file, no truncation
   const mmdLabel = (s: string) =>
     s.replace(/"/g, "'").replace(/[\r\n]/g, ' ').slice(0, 60)
 
-  // Safe node id for Mermaid (alphanumeric + underscore only)
   const mmdId = (id: string) =>
     id.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 40)
 
@@ -485,14 +688,23 @@ export async function exportMermaid(
   }
 
   // Edge type → Mermaid arrow style
-  const arrowStyle: Record<EdgeType, string> = {
-    navigates_to: '-->',
-    uses_flag: '-. uses_flag .->',
-    calls_api: '==>',
-    reads_state: '-. reads_state .->',
-    renders: '--renders-->',
-    related: '<-->',
-    generic: '-->',
+  const arrowStyle: Record<string, string> = {
+    // Phase 11 semantic
+    navigates_to:        '-->',
+    contains:            '--contains-->',
+    submits_to:          '==submits==>',
+    triggers:            '-. triggers .->',
+    validates_via:       '-. validates .->',
+    redirects_to:        '-.redirects.->',
+    authenticates_with:  '==auth==>',
+    auth_gate:           '-. auth_gate .->',
+    // Legacy
+    uses_flag:           '-. uses_flag .->',
+    calls_api:           '==>',
+    reads_state:         '-. reads_state .->',
+    renders:             '--renders-->',
+    related:             '<-->',
+    generic:             '-->',
   }
 
   for (const edge of edges) {
@@ -505,7 +717,6 @@ export async function exportMermaid(
   const homeMMDPath = join(getHomeGraphsDir(), sessionMmdFileName(id))
   const cwdMMDPath = join(getCwdGraphsDir(), sessionMmdFileName(id))
 
-  // Write full diagram — no truncation
   await Promise.allSettled([
     writeFile(homeMMDPath, `${diagram}\n`, 'utf-8'),
     writeFile(cwdMMDPath, `${diagram}\n`, 'utf-8'),
@@ -514,10 +725,7 @@ export async function exportMermaid(
   return { homeMMDPath, cwdMMDPath, diagram, nodeCount: nodeMap.size, edgeCount: edges.length }
 }
 
-// ─── saveAllFormats — write NDJSON + JSON + MMD in one atomic call ────────────
-// Called automatically by map_site_start after every page crawled.
-// Also exposed as the graph_save tool for manual use.
-// No truncation anywhere — all data written in full to disk.
+// ─── saveAllFormats — write NDJSON + JSON + MMD in one atomic call ───────────────────────────
 
 export async function saveAllFormats(
   sessionId?: string,
@@ -548,7 +756,7 @@ export async function saveAllFormats(
   }
 }
 
-// ─── List saved graphs ────────────────────────────────────────────────────────
+// ─── List saved graphs ────────────────────────────────────────────────────────────────────
 
 export interface GraphFileInfo {
   sessionId: string
@@ -604,7 +812,7 @@ export async function listGraphFiles(): Promise<GraphFileInfo[]> {
   return results
 }
 
-// ─── Load session from disk ───────────────────────────────────────────────────
+// ─── Load session from disk ─────────────────────────────────────────────────────────────
 
 export async function loadSessionFromDisk(sessionId: string): Promise<GraphSummary> {
   const homeDir = getHomeGraphsDir()
@@ -681,7 +889,7 @@ export async function loadSessionFromDisk(sessionId: string): Promise<GraphSumma
   }
 }
 
-// ─── Reset / clear ────────────────────────────────────────────────────────────
+// ─── Reset / clear ─────────────────────────────────────────────────────────────────────────────
 
 export function resetActiveSession(): void {
   if (activeSessionId) {
