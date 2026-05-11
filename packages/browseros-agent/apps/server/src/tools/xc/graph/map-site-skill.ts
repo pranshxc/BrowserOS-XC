@@ -7,26 +7,31 @@
  *       1. Navigate to page
  *       2. addNode (persistent store — written to disk immediately)
  *       3. Discover links -> addEdge for each (persistent store)
- *       4. exportGraph() — write fresh .json snapshot to disk
+ *       4. saveAllFormats() — write fresh .ndjson + .json + .mmd to disk after every page
  *       5. Move to next page
  *     -> final summary with file paths
  *
  * All data is written to TWO locations simultaneously:
  *   ~/.browseros/graphs/<session>.ndjson  (home dir, always present)
  *   ./graphs/<session>.ndjson             (cwd, for easy access)
- * Plus a .json snapshot updated after every page:
- *   ~/.browseros/graphs/<session>.json
+ * Plus .json and .mmd snapshots updated after EVERY page:
+ *   ~/.browseros/graphs/<session>.json    (full JSON export)
+ *   ~/.browseros/graphs/<session>.mmd     (Mermaid flowchart diagram)
  *   ./graphs/<session>.json
+ *   ./graphs/<session>.mmd
+ *
+ * You do NOT need to call graph_export or graph_mermaid manually.
+ * All three formats are auto-saved after every single page visit.
  */
 import { z } from 'zod'
 import { defineTool } from '../../framework'
 import {
   addEdge,
   addNode,
-  exportGraph,
   generateSessionId,
   getOrCreateSession,
   getSessionSummary,
+  saveAllFormats,
 } from './store'
 
 interface BfsState {
@@ -43,6 +48,8 @@ interface BfsState {
   cwdPath: string
   homeJsonPath: string
   cwdJsonPath: string
+  homeMMDPath: string
+  cwdMMDPath: string
   pagesVisited: number
   lastError: string | null
 }
@@ -69,10 +76,12 @@ export const map_site_start = defineTool({
   description: [
     'Autonomously BFS-crawl a website and build a persistent knowledge graph.',
     'Every page visit, link, and relationship is written to disk immediately (NDJSON).',
-    'A .json snapshot is also saved after every page so the file is always current.',
-    'Returns file paths + summary when done — you do NOT need to call graph_export manually.',
+    'After every single page, THREE formats are auto-saved to disk:',
+    '  .ndjson (raw append log), .json (full structured export), .mmd (Mermaid flowchart diagram).',
+    'You do NOT need to call graph_export or graph_mermaid manually — it is all automatic.',
+    'Returns file paths + summary when done.',
     'REQUIRED: url. OPTIONAL: maxDepth (1-5, default 2), maxPages (1-100, default 20),',
-    'session_id (auto-generated from URL if omitted).',
+    'session_id (auto-generated from URL if omitted), mermaid_direction (LR or TD, default LR).',
   ].join(' '),
   approvalCategory: 'observation',
   input: z.object({
@@ -83,6 +92,8 @@ export const map_site_start = defineTool({
       .describe('Maximum pages to visit (default: 20, max: 100)'),
     session_id: z.string().optional()
       .describe('Graph session ID. Auto-generated from URL if omitted. Reuse to resume/extend a previous crawl.'),
+    mermaid_direction: z.enum(['LR', 'TD']).default('LR')
+      .describe('Mermaid diagram direction: LR (left-to-right, default) or TD (top-down).'),
   }),
   async handler(args, ctx, response) {
     const origin = (() => {
@@ -92,6 +103,8 @@ export const map_site_start = defineTool({
     // Create / reuse persistent graph session
     const sessionId = args.session_id ?? urlToSessionId(args.url)
     const session = await getOrCreateSession(sessionId)
+
+    const mermaidDir = (args.mermaid_direction ?? 'LR') as 'LR' | 'TD'
 
     bfsState = {
       sessionId,
@@ -107,6 +120,8 @@ export const map_site_start = defineTool({
       cwdPath: session.cwdPath,
       homeJsonPath: session.homePath.replace(/\.ndjson$/, '.json'),
       cwdJsonPath: session.cwdPath.replace(/\.ndjson$/, '.json'),
+      homeMMDPath: session.homePath.replace(/\.ndjson$/, '.mmd'),
+      cwdMMDPath: session.cwdPath.replace(/\.ndjson$/, '.mmd'),
       pagesVisited: 0,
       lastError: null,
     }
@@ -172,8 +187,9 @@ export const map_site_start = defineTool({
           }
         }
 
-        // Auto-save JSON snapshot after every page (incremental export)
-        await exportGraph(sessionId)
+        // Auto-save ALL THREE formats after every page — ndjson + json + mmd
+        // No manual graph_export or graph_mermaid call needed.
+        await saveAllFormats(sessionId, mermaidDir)
 
       } catch (err) {
         bfsState.lastError = err instanceof Error ? err.message : String(err)
@@ -184,6 +200,8 @@ export const map_site_start = defineTool({
           { url, depth, error: bfsState.lastError, statusCode: 0 },
           sessionId,
         ).catch(() => {/* ignore double-add */})
+        // Still save after error so partial data is never lost
+        await saveAllFormats(sessionId, mermaidDir).catch(() => {/* ignore save error */})
       } finally {
         if (pageId !== undefined) {
           try { await ctx.browser.closePage(pageId) } catch { /* ignore */ }
@@ -193,11 +211,15 @@ export const map_site_start = defineTool({
 
     bfsState.status = 'done'
 
-    // Final export + summary
-    const [exportResult, summary] = await Promise.all([
-      exportGraph(sessionId),
+    // Final save + summary
+    const [saveResult, summary] = await Promise.all([
+      saveAllFormats(sessionId, mermaidDir),
       getSessionSummary(sessionId),
     ])
+
+    // Update bfsState paths from actual save result
+    bfsState.homeMMDPath = saveResult.homeMMDPath
+    bfsState.cwdMMDPath = saveResult.cwdMMDPath
 
     response.text(
       JSON.stringify(
@@ -212,15 +234,25 @@ export const map_site_start = defineTool({
           },
           files: {
             ndjson: {
-              home: summary.homePath,
-              cwd: summary.cwdPath,
+              home: saveResult.homeNdjsonPath,
+              cwd: saveResult.cwdNdjsonPath,
             },
             json: {
-              home: exportResult.homeJsonPath,
-              cwd: exportResult.cwdJsonPath,
+              home: saveResult.homeJsonPath,
+              cwd: saveResult.cwdJsonPath,
+            },
+            mermaid: {
+              home: saveResult.homeMMDPath,
+              cwd: saveResult.cwdMMDPath,
             },
           },
-          note: 'Graph is fully saved to disk. Use graph_load to re-open this session. Use graph_query to inspect data.',
+          note: [
+            'All three formats saved to disk after every page — no manual export needed.',
+            'Use graph_load to re-open this session.',
+            'Use graph_query to inspect data.',
+            'Use graph_read to read file content back.',
+            'Paste the .mmd file at https://mermaid.live to visualise the graph.',
+          ].join(' '),
         },
         null,
         2,
@@ -258,6 +290,7 @@ export const map_site_bfs_status = defineTool({
           files: {
             ndjson: { home: bfsState.homePath, cwd: bfsState.cwdPath },
             json: { home: bfsState.homeJsonPath, cwd: bfsState.cwdJsonPath },
+            mermaid: { home: bfsState.homeMMDPath, cwd: bfsState.cwdMMDPath },
           },
           graph: summary
             ? { nodes: summary.nodeCount, edges: summary.edgeCount, nodeTypes: summary.nodeTypes }

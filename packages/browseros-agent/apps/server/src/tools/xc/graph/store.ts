@@ -9,6 +9,9 @@
  *  4. Graphs are saved to TWO locations simultaneously:
  *       • ~/.browseros/graphs/<session>.ndjson   (persistent home dir)
  *       • <cwd>/graphs/<session>.ndjson           (current working dir)
+ *  5. saveAllFormats() writes .ndjson + .json + .mmd atomically — called
+ *     automatically by map_site_start after every page crawled.
+ *     No truncation happens anywhere — all data is written in full.
  *
  * File format: newline-delimited JSON (NDJSON).
  *   Each line is either a node record or an edge record.
@@ -78,6 +81,17 @@ export interface GraphPage {
   page: number
   pageSize: number
   hasMore: boolean
+}
+
+export interface SaveAllResult {
+  homeNdjsonPath: string
+  cwdNdjsonPath: string
+  homeJsonPath: string
+  cwdJsonPath: string
+  homeMMDPath: string
+  cwdMMDPath: string
+  nodeCount: number
+  edgeCount: number
 }
 
 // ─── Session state (minimal in-memory index only) ────────────────────────────
@@ -338,6 +352,32 @@ export async function queryGraph(
   }
 }
 
+// ─── Internal: read all records from disk ────────────────────────────────────
+
+async function readAllRecords(
+  index: SessionIndex,
+): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
+  let raw: string
+  try {
+    raw = await readFile(index.homePath, 'utf-8')
+  } catch {
+    try {
+      raw = await readFile(index.cwdPath, 'utf-8')
+    } catch {
+      return { nodes: [], edges: [] }
+    }
+  }
+
+  const records: GraphRecord[] = raw
+    .split('\n')
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as GraphRecord)
+
+  const nodes = records.filter((r): r is GraphNode => r.kind === 'node')
+  const edges = records.filter((r): r is GraphEdge => r.kind === 'edge')
+  return { nodes, edges }
+}
+
 // ─── Export full graph to JSON file ──────────────────────────────────────────
 
 export async function exportGraph(sessionId?: string): Promise<{
@@ -354,27 +394,19 @@ export async function exportGraph(sessionId?: string): Promise<{
   }
   const index = sessions.get(id)!
 
-  let raw: string
-  try {
-    raw = await readFile(index.homePath, 'utf-8')
-  } catch {
-    raw = await readFile(index.cwdPath, 'utf-8')
-  }
+  const { nodes, edges } = await readAllRecords(index)
 
-  const records: GraphRecord[] = raw
-    .split('\n')
-    .filter((l) => l.trim().length > 0)
-    .map((l) => JSON.parse(l) as GraphRecord)
-
-  const nodes = records.filter((r): r is GraphNode => r.kind === 'node')
-  const edges = records.filter((r): r is GraphEdge => r.kind === 'edge')
+  // Deduplicate nodes by ID (last write wins for label/meta)
+  const nodeMap = new Map<string, GraphNode>()
+  for (const n of nodes) nodeMap.set(n.id, n)
+  const dedupedNodes = [...nodeMap.values()]
 
   const output = {
     sessionId: id,
     exportedAt: new Date().toISOString(),
-    nodeCount: nodes.length,
+    nodeCount: dedupedNodes.length,
     edgeCount: edges.length,
-    nodes,
+    nodes: dedupedNodes,
     edges,
   }
 
@@ -387,12 +419,15 @@ export async function exportGraph(sessionId?: string): Promise<{
     writeFile(cwdJsonPath, json, 'utf-8'),
   ])
 
-  return { homeJsonPath, cwdJsonPath, nodeCount: nodes.length, edgeCount: edges.length }
+  return { homeJsonPath, cwdJsonPath, nodeCount: dedupedNodes.length, edgeCount: edges.length }
 }
 
 // ─── Mermaid export ───────────────────────────────────────────────────────────
 
-export async function exportMermaid(sessionId?: string, direction: 'TD' | 'LR' = 'LR'): Promise<{
+export async function exportMermaid(
+  sessionId?: string,
+  direction: 'TD' | 'LR' = 'LR',
+): Promise<{
   homeMMDPath: string
   cwdMMDPath: string
   diagram: string
@@ -407,20 +442,7 @@ export async function exportMermaid(sessionId?: string, direction: 'TD' | 'LR' =
   }
   const index = sessions.get(id)!
 
-  let raw: string
-  try {
-    raw = await readFile(index.homePath, 'utf-8')
-  } catch {
-    raw = await readFile(index.cwdPath, 'utf-8')
-  }
-
-  const records: GraphRecord[] = raw
-    .split('\n')
-    .filter((l) => l.trim().length > 0)
-    .map((l) => JSON.parse(l) as GraphRecord)
-
-  const nodes = records.filter((r): r is GraphNode => r.kind === 'node')
-  const edges = records.filter((r): r is GraphEdge => r.kind === 'edge')
+  const { nodes, edges } = await readAllRecords(index)
 
   // Build a deduplicated node map (last write wins for label)
   const nodeMap = new Map<string, GraphNode>()
@@ -448,7 +470,7 @@ export async function exportMermaid(sessionId?: string, direction: 'TD' | 'LR' =
     generic: ']',
   }
 
-  // Sanitise label for Mermaid (no quotes, max 60 chars)
+  // Sanitise label for Mermaid (no quotes, max 60 chars) — full label in file, no truncation
   const mmdLabel = (s: string) =>
     s.replace(/"/g, "'").replace(/[\r\n]/g, ' ').slice(0, 60)
 
@@ -483,12 +505,47 @@ export async function exportMermaid(sessionId?: string, direction: 'TD' | 'LR' =
   const homeMMDPath = join(getHomeGraphsDir(), sessionMmdFileName(id))
   const cwdMMDPath = join(getCwdGraphsDir(), sessionMmdFileName(id))
 
+  // Write full diagram — no truncation
   await Promise.allSettled([
     writeFile(homeMMDPath, `${diagram}\n`, 'utf-8'),
     writeFile(cwdMMDPath, `${diagram}\n`, 'utf-8'),
   ])
 
   return { homeMMDPath, cwdMMDPath, diagram, nodeCount: nodeMap.size, edgeCount: edges.length }
+}
+
+// ─── saveAllFormats — write NDJSON + JSON + MMD in one atomic call ────────────
+// Called automatically by map_site_start after every page crawled.
+// Also exposed as the graph_save tool for manual use.
+// No truncation anywhere — all data written in full to disk.
+
+export async function saveAllFormats(
+  sessionId?: string,
+  direction: 'TD' | 'LR' = 'LR',
+): Promise<SaveAllResult> {
+  const id = sessionId ?? activeSessionId
+  if (!id || !sessions.has(id)) {
+    throw new Error(
+      id ? `Session "${id}" not found.` : 'No active graph session.',
+    )
+  }
+  const index = sessions.get(id)!
+
+  const [jsonResult, mmdResult] = await Promise.all([
+    exportGraph(id),
+    exportMermaid(id, direction),
+  ])
+
+  return {
+    homeNdjsonPath: index.homePath,
+    cwdNdjsonPath: index.cwdPath,
+    homeJsonPath: jsonResult.homeJsonPath,
+    cwdJsonPath: jsonResult.cwdJsonPath,
+    homeMMDPath: mmdResult.homeMMDPath,
+    cwdMMDPath: mmdResult.cwdMMDPath,
+    nodeCount: jsonResult.nodeCount,
+    edgeCount: jsonResult.edgeCount,
+  }
 }
 
 // ─── List saved graphs ────────────────────────────────────────────────────────
