@@ -82,6 +82,17 @@ import {
   graph_load,
   graph_reset,
 } from './xc/graph'
+import {
+  graph_add_page,
+  graph_add_feature,
+  graph_add_api,
+  graph_add_workflow,
+} from './xc/graph/graph-tools'
+import {
+  map_site_start,
+  map_site_bfs_status,
+  map_site_enqueue,
+} from './xc/graph/map-site-skill'
 
 export const registry = createRegistry([
   // Navigation (8)
@@ -165,7 +176,7 @@ export const registry = createRegistry([
   suggest_schedule,
   suggest_app_connection,
 
-  // Graph (9)
+  // Graph — disk-persistent (9)
   graph_add_node,
   graph_add_edge,
   graph_summary,
@@ -175,4 +186,15 @@ export const registry = createRegistry([
   graph_list,
   graph_load,
   graph_reset,
+
+  // Graph — in-memory node types (4)
+  graph_add_page,
+  graph_add_feature,
+  graph_add_api,
+  graph_add_workflow,
+
+  // Site mapping — BFS crawler (3)
+  map_site_start,
+  map_site_bfs_status,
+  map_site_enqueue,
 ])

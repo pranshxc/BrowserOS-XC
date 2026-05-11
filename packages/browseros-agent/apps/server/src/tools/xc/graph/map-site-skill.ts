@@ -23,24 +23,25 @@ export const map_site_start = defineTool({
   description:
     'Start an autonomous BFS crawl of a website to build its knowledge graph. ' +
     'Navigates pages, discovers features, APIs, and workflows, and populates the graph. ' +
-    'Call graph_export or graph_summary after completion to inspect results.',
+    'Call graph_export or graph_summary after completion to inspect results. ' +
+    'REQUIRED: url (string). OPTIONAL: maxDepth (number 1-5, default 2), maxPages (number 1-100, default 20).',
   approvalCategory: 'observation',
   input: z.object({
     url: z.string().describe('Root URL to start mapping from'),
     maxDepth: z
-      .number()
+      .coerce.number()
       .int()
       .min(1)
       .max(5)
       .default(2)
-      .describe('Maximum BFS depth (default: 2)'),
+      .describe('Maximum BFS depth (default: 2, max: 5)'),
     maxPages: z
-      .number()
+      .coerce.number()
       .int()
       .min(1)
       .max(100)
       .default(20)
-      .describe('Maximum pages to visit (default: 20)'),
+      .describe('Maximum pages to visit (default: 20, max: 100)'),
   }),
   async handler(args, ctx, response) {
     const origin = (() => {
