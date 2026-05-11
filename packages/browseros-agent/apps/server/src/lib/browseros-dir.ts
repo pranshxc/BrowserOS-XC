@@ -1,5 +1,5 @@
 import { unlinkSync } from 'node:fs'
-import { readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { PATHS } from '@browseros/shared/constants/paths'
@@ -65,11 +65,6 @@ export function getDbPath(): string {
   return join(getBrowserosDir(), PATHS.DB_DIR_NAME, PATHS.DB_FILE_NAME)
 }
 
-/** Returns the directory where knowledge graph data is persisted. */
-export function getGraphDir(): string {
-  return join(getBrowserosDir(), PATHS.GRAPH_DIR_NAME)
-}
-
 export function getVmCacheDir(): string {
   return join(getCacheDir(), 'vm')
 }
@@ -102,6 +97,11 @@ export function getServerConfigPath(): string {
   return join(getBrowserosDir(), PATHS.SERVER_CONFIG_FILE_NAME)
 }
 
+/** Returns the persistent graphs directory under ~/.browseros/graphs */
+export function getGraphsDir(): string {
+  return join(homedir(), '.browseros', 'graphs')
+}
+
 export async function writeServerConfig(
   config: ServerDiscoveryConfig,
 ): Promise<void> {
@@ -116,15 +116,20 @@ export function removeServerConfigSync(): void {
   }
 }
 
+async function ensureGraphsDir(): Promise<void> {
+  const homeGraphsDir = getGraphsDir()
+  await mkdir(homeGraphsDir, { recursive: true })
+}
+
 export async function ensureBrowserosDir(): Promise<void> {
   logDevelopmentBrowserosDir()
   await ensureDirectory(getMemoryDir())
   await ensureDirectory(getSkillsDir())
   await ensureDirectory(getBuiltinSkillsDir())
   await ensureDirectory(getSessionsDir())
-  await ensureDirectory(getGraphDir())
   await ensureDirectory(getLazyMonitoringRunsDir())
   await ensureDirectory(getVmDisksDir())
+  await ensureGraphsDir()
 }
 
 export async function cleanOldSessions(): Promise<void> {

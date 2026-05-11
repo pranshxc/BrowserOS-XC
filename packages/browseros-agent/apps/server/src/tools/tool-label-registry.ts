@@ -99,6 +99,17 @@ const VERB_OVERRIDES: Record<string, string> = {
   focus_window: 'Focused window',
   close_window: 'Closed window',
   create_window: 'Created window',
+
+  // Graph (XC)
+  graph_add_node: 'Added graph node',
+  graph_add_edge: 'Added graph edge',
+  graph_summary: 'Checked graph summary',
+  graph_query: 'Queried graph',
+  graph_export: 'Exported graph to disk',
+  graph_mermaid: 'Generated Mermaid diagram',
+  graph_list: 'Listed graph sessions',
+  graph_load: 'Loaded graph session',
+  graph_reset: 'Reset graph session',
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -230,12 +241,6 @@ const SUBJECT_EXTRACTORS: Record<string, SubjectExtractor> = {
     return typeof page === 'number' ? `tab ${page}` : asString(page)
   },
 
-  // Page reads (take_snapshot, take_enhanced_snapshot, get_page_content,
-  // get_page_links, get_dom, take_screenshot) intentionally omit a
-  // subject — the only argument is a numeric page ID that's internal
-  // to the agent and meaningless to the user ("tab 4" tells them nothing).
-  // The verb alone communicates what happened.
-
   // External actions via Strata
   execute_action: (i) => {
     const server = stringField(i, 'server_name')
@@ -266,6 +271,25 @@ const SUBJECT_EXTRACTORS: Record<string, SubjectExtractor> = {
 
   // History
   delete_history_url: (i) => formatUrl(i.url),
+
+  // Graph (XC) — show node label or session id as subject
+  graph_add_node: (i) => truncate(stringField(i, 'label'), 50),
+  graph_add_edge: (i) => {
+    const from = stringField(i, 'from')
+    const to = stringField(i, 'to')
+    if (from && to) return truncate(`${from} → ${to}`, 50)
+    return from ?? to
+  },
+  graph_summary: (i) => stringField(i, 'session_id'),
+  graph_query: (i) => {
+    const kind = stringField(i, 'kind')
+    const type = stringField(i, 'type')
+    if (kind && type) return `${kind}:${type}`
+    return kind ?? type
+  },
+  graph_export: (i) => stringField(i, 'session_id'),
+  graph_mermaid: (i) => stringField(i, 'session_id'),
+  graph_load: (i) => stringField(i, 'session_id'),
 }
 
 // ──────────────────────────────────────────────────────────────────────
