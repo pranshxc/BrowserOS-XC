@@ -28,9 +28,15 @@
  * popup, nav_region, js_bundle, local_storage, schema_org) + typed edges
  * (contains, submits_to, triggers, navigates_to, authenticates_with).
  *
- * File output: THREE formats auto-saved to TWO locations after every page:
+ * File output: THREE formats auto-saved to TWO locations.
+ *   NDJSON is appended after every node/edge write (always current).
+ *   JSON + Mermaid tree are regenerated every SAVE_INTERVAL pages AND on finish.
  *   ~/.browseros/graphs/<session>.ndjson + .json + .mmd
  *   ./graphs/<session>.ndjson + .json + .mmd
+ *
+ * Session IDs are DETERMINISTIC from the URL (no random suffix).
+ *   Same URL → same session ID → agent can resume a prior crawl.
+ *   Use map_site_resume to continue from where a previous run left off.
  *
  * No Playwright APIs used anywhere. 100% ctx.browser.* only.
  */
@@ -39,9 +45,10 @@ import { defineTool } from '../../framework'
 import {
   addEdge,
   addNode,
-  generateSessionId,
   getOrCreateSession,
   getSessionSummary,
+  listGraphFiles,
+  loadSessionFromDisk,
   saveAllFormats,
 } from './store'
 import {
@@ -58,13 +65,19 @@ import {
   nowISO,
 } from './schema'
 
+// How often to regenerate the full JSON + Mermaid tree during crawl.
+// NDJSON is always appended immediately (disk-first, no data loss).
+// JSON/MMD are periodic snapshots for inspection; final save always happens on finish.
+const SAVE_INTERVAL = 10 // pages
+
 interface BfsState {
   sessionId: string
   rootUrl: string
   visited: Set<string>
+  queued: Set<string>   // O(1) membership check — replaces Array.includes
   queue: string[]
   maxDepth: number
-  maxPages: number
+  maxPages: number | null  // null = unlimited (crawl until exhausted)
   depthMap: Map<string, number>
   status: 'idle' | 'running' | 'done' | 'error'
   startedAt: number
@@ -80,23 +93,37 @@ interface BfsState {
 
 let bfsState: BfsState | null = null
 
+/**
+ * Deterministic session ID from URL — NO random suffix.
+ * Same URL always produces the same session ID, enabling session resume.
+ * Format: map-{hostname-slug}-{path-slug}
+ * Examples:
+ *   https://www.twilio.com/en-us  →  map-www-twilio-com-en-us
+ *   https://stripe.com/docs       →  map-stripe-com-docs
+ */
 function urlToSessionId(url: string): string {
   try {
     const u = new URL(url)
-    const slug = (u.hostname + u.pathname)
+    const hostSlug = u.hostname.replace(/[^a-z0-9]+/gi, '-').toLowerCase()
+    const pathSlug = u.pathname
       .replace(/[^a-z0-9]+/gi, '-')
       .replace(/^-+|-+$/g, '')
-      .slice(0, 40)
       .toLowerCase()
-    return `map-${slug}-${Math.random().toString(36).slice(2, 6)}`
+      .slice(0, 30)
+    return pathSlug ? `map-${hostSlug}-${pathSlug}` : `map-${hostSlug}`
   } catch {
-    return generateSessionId()
+    return `map-${slugify(url).slice(0, 50)}`
   }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Infer the semantic role of a page from its URL, title and content signals.
+ * All parameters are now correctly populated at the call site.
+ */
 function inferPageRole(
+  url: string,
   title: string,
   h1: string,
   hasPassword: boolean,
@@ -104,11 +131,12 @@ function inferPageRole(
   hasDocs: boolean,
 ): 'landing' | 'login' | 'dashboard' | 'form' | 'docs' | 'pricing' | 'blog' | 'other' {
   const text = (title + ' ' + h1).toLowerCase()
-  if (hasPassword || /sign.?in|log.?in|login/.test(text)) return 'login'
-  if (hasPricing || /pricing|plan|subscription/.test(text)) return 'pricing'
-  if (hasDocs || /docs|documentation|api.?reference/.test(text)) return 'docs'
-  if (/dashboard|console|admin|portal/.test(text)) return 'dashboard'
-  if (/blog|post|article|news/.test(text)) return 'blog'
+  const urlLower = url.toLowerCase()
+  if (hasPassword || /sign.?in|log.?in|login/.test(text) || /\/login|\/signin|\/auth/.test(urlLower)) return 'login'
+  if (hasPricing || /pricing|plan|subscription/.test(text) || /\/pricing|\/plans/.test(urlLower)) return 'pricing'
+  if (hasDocs || /docs|documentation|api.?reference/.test(text) || /\/docs|\/documentation|\/api-reference|\/reference/.test(urlLower)) return 'docs'
+  if (/dashboard|console|admin|portal/.test(text) || /\/dashboard|\/console|\/admin/.test(urlLower)) return 'dashboard'
+  if (/blog|post|article|news/.test(text) || /\/blog|\/posts|\/news/.test(urlLower)) return 'blog'
   return 'landing'
 }
 
@@ -125,6 +153,22 @@ function inferFormPurpose(action: string, fields: Array<{ inputType: string; nam
   return 'Submit'
 }
 
+/**
+ * Clean a raw URL for use as a node label or meta array entry.
+ * Strips query string + fragment. Preserves scheme + host + path.
+ * Returns path-only string capped at 120 chars.
+ */
+function cleanUrlLabel(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl)
+    const clean = u.origin + u.pathname
+    return clean.length > 120 ? `${clean.slice(0, 117)}...` : clean
+  } catch {
+    const noQuery = rawUrl.split('?')[0].split('#')[0]
+    return noQuery.length > 120 ? `${noQuery.slice(0, 117)}...` : noQuery
+  }
+}
+
 // ─── Main BFS tool ────────────────────────────────────────────────────────────
 
 export const map_site_start = defineTool({
@@ -139,21 +183,28 @@ export const map_site_start = defineTool({
     '  Phase 5: searchDom — CSS queries for passwords, dialogs, ARIA-labeled elements',
     '  Phase 6: evaluate — Performance API network interception for API call detection',
     '  Phase 7: getPageLinks — BFS link discovery via accessibility tree',
-    'Produces nodes: page, form, field, action, api_call, popup, nav_region, js_bundle,',
-    'local_storage, schema_org — plus typed edges (contains, submits_to, triggers, etc.).',
-    'All three formats (.ndjson, .json, .mmd) auto-saved after every page.',
-    'REQUIRED: url. OPTIONAL: maxDepth (1-5, default 2), maxPages (1-100, default 20),',
-    'session_id (auto-generated if omitted), mermaid_direction (LR or TD, default LR).',
-  ].join(' '),
+    '',
+    'After this call completes, the graph already contains:',
+    'routes, feature flags, GraphQL endpoints, Redux slices, JS bundles, nav regions,',
+    'forms (global), schema.org, api_calls — DO NOT call eval_extract_* again.',
+    '',
+    'SESSION CONTINUITY: Session IDs are deterministic from the URL.',
+    'Same URL always produces the same session ID. If a prior crawl exists for this URL,',
+    'use map_site_resume instead to continue from where it left off.',
+    '',
+    'maxPages: Set based on site size. Small site: 20-30. Medium: 50-80. Large/docs: 100+.',
+    'Omit maxPages to crawl until all discovered links at maxDepth are exhausted.',
+    'maxDepth: 1 = homepage only. 2 = homepage + linked pages (recommended). 3+ = deep crawl.',
+  ].join('\n'),
   approvalCategory: 'observation',
   input: z.object({
     url: z.string().describe('Root URL to start crawling from'),
     maxDepth: z.coerce.number().int().min(1).max(5).default(2)
-      .describe('Maximum BFS depth (default: 2, max: 5)'),
-    maxPages: z.coerce.number().int().min(1).max(100).default(20)
-      .describe('Maximum pages to visit (default: 20, max: 100)'),
+      .describe('Maximum BFS depth (default: 2, max: 5). Use 3+ for documentation sites.'),
+    maxPages: z.coerce.number().int().min(1).max(500).optional()
+      .describe('Maximum pages to visit. Omit to crawl all discovered links. Small site: 20-30. Medium: 50-100. Large/docs: 100-500.'),
     session_id: z.string().optional()
-      .describe('Graph session ID. Auto-generated from URL if omitted.'),
+      .describe('Graph session ID. Auto-generated from URL if omitted (deterministic — same URL = same ID).'),
     mermaid_direction: z.enum(['LR', 'TD']).default('LR')
       .describe('Mermaid diagram direction: LR (left-to-right) or TD (top-down).'),
   }),
@@ -166,14 +217,16 @@ export const map_site_start = defineTool({
     const sessionId = args.session_id ?? urlToSessionId(args.url)
     const session = await getOrCreateSession(sessionId)
     const mermaidDir = (args.mermaid_direction ?? 'LR') as 'LR' | 'TD'
+    const maxPages = args.maxPages ?? Infinity
 
     bfsState = {
       sessionId,
       rootUrl: args.url,
       visited: new Set(),
+      queued: new Set([args.url]),  // O(1) membership check
       queue: [args.url],
       maxDepth: args.maxDepth,
-      maxPages: args.maxPages,
+      maxPages: args.maxPages ?? null,
       depthMap: new Map([[args.url, 0]]),
       status: 'running',
       startedAt: Date.now(),
@@ -189,7 +242,7 @@ export const map_site_start = defineTool({
 
     await addNode('Root', 'page', { url: args.url, depth: 0 }, sessionId)
 
-    while (bfsState.queue.length > 0 && bfsState.pagesVisited < args.maxPages) {
+    while (bfsState.queue.length > 0 && bfsState.pagesVisited < maxPages) {
       const url = bfsState.queue.shift()!
       if (bfsState.visited.has(url)) continue
       bfsState.visited.add(url)
@@ -203,7 +256,7 @@ export const map_site_start = defineTool({
         pageId = await ctx.browser.newPage(url, { background: true })
         await ctx.browser.goto(pageId, url)
 
-        // ── Phase 1: JS evaluate — page semantics, framework, storage ──────────
+        // ── Phase 1: JS evaluate — page semantics, framework, storage ──────────────────
         let title = url
         let h1 = ''
         let description = ''
@@ -272,7 +325,7 @@ export const map_site_start = defineTool({
           }
         } catch { /* Phase 1 failed — continue with defaults */ }
 
-        // ── Phase 6: Performance API — infer API calls from resource timing ────
+        // ── Phase 6: Performance API — infer API calls from resource timing ────────
         try {
           const perfResult = await ctx.browser.evaluate(pageId, `(() => {
             return performance.getEntriesByType('resource')
@@ -286,7 +339,10 @@ export const map_site_start = defineTool({
               .slice(0, 20)
           })()`)
           if (Array.isArray(perfResult.value)) {
-            apiCallsObserved = perfResult.value as string[]
+            // Clean: strip query strings, store path-only labels (fix Issue 3+4)
+            apiCallsObserved = (perfResult.value as string[])
+              .map(cleanUrlLabel)
+              .slice(0, 10)
           }
         } catch { /* Phase 6 failed — continue */ }
 
@@ -296,406 +352,4 @@ export const map_site_start = defineTool({
         try {
           const dialogSearch = await ctx.browser.searchDom(pageId, '[role="dialog"],[role="alertdialog"],.modal,dialog', { limit: 10 })
           hasDialogs = dialogSearch.results.length > 0
-          dialogCount = dialogSearch.results.length
-        } catch { /* Phase 5 failed — continue */ }
-
-        const pageRole = inferPageRole(title, h1, hasPassword, false, false)
-
-        // ── Add main page node ─────────────────────────────────────────────────
-        const { nodeId: mainNodeId } = await addNode(
-          title,
-          'page',
-          {
-            url,
-            depth,
-            statusCode: 200,
-            title,
-            description,
-            h1,
-            pageRole,
-            hasAuth: hasPassword,
-            framework: framework || undefined,
-            apiCallsObserved,
-            schemaOrgTypes: schemaOrgBlocks.map(b => b.type),
-          },
-          sessionId,
-        )
-
-        // ── Phase 2+3: snapshot + enhancedSnapshot — interactive elements ──────
-        let snapshotText = ''
-        try {
-          snapshotText = (await ctx.browser.snapshot(pageId)) ?? ''
-        } catch { /* Phase 2 failed — continue */ }
-
-        let enhancedSnapshotText = ''
-        try {
-          enhancedSnapshotText = (await ctx.browser.enhancedSnapshot(pageId)) ?? ''
-        } catch { /* Phase 3 failed — continue */ }
-
-        // Extract ARIA landmark roles from enhanced snapshot
-        const landmarkRoles = ['navigation', 'banner', 'main', 'contentinfo', 'complementary', 'search']
-        for (const role of landmarkRoles) {
-          if (enhancedSnapshotText.toLowerCase().includes(role)) {
-            try {
-              const nrId = navRegionId(pageSlug, role)
-              const { nodeId: nrNodeId } = await addNode(role, 'nav_region', {
-                parentPageId: mainNodeId,
-                role,
-                discoveredAt: nowISO(),
-              }, sessionId)
-              await addEdge(mainNodeId, nrNodeId, 'contains', { role }, sessionId)
-            } catch { /* skip */ }
-          }
-        }
-
-        // Extract popups from enhanced snapshot / searchDom results
-        if (hasDialogs) {
-          try {
-            const pdId = popupId(pageSlug, 0)
-            const { nodeId: popupNodeId } = await addNode('dialog', 'popup', {
-              parentPageId: mainNodeId,
-              role: 'dialog',
-              discoveredAt: nowISO(),
-            }, sessionId)
-            await addEdge(mainNodeId, popupNodeId, 'contains', { count: dialogCount }, sessionId)
-          } catch { /* skip */ }
-        }
-
-        // ── Phase 4: getDom('form') — extract all forms + fields ───────────────
-        try {
-          const formDomResult = await ctx.browser.getDom(pageId, { selector: 'form' })
-          if (formDomResult) {
-            // Parse form count and basic attributes via evaluate
-            const formsResult = await ctx.browser.evaluate(pageId, `(() => {
-              return Array.from(document.querySelectorAll('form')).map((f, i) => {
-                const fields = Array.from(f.elements)
-                  .filter(el => ['INPUT','SELECT','TEXTAREA'].includes(el.tagName))
-                  .map(el => ({
-                    tag: el.tagName.toLowerCase(),
-                    inputType: (el.type || el.tagName.toLowerCase()),
-                    name: el.name || '',
-                    id: el.id || '',
-                    placeholder: el.placeholder || '',
-                    required: el.required || false,
-                    autocomplete: el.autocomplete || '',
-                    label: (() => {
-                      if (el.id) {
-                        const l = document.querySelector('label[for="' + el.id + '"]')
-                        if (l) return l.textContent?.trim() ?? ''
-                      }
-                      return el.getAttribute('aria-label') ?? ''
-                    })(),
-                    options: el.tagName === 'SELECT'
-                      ? Array.from(el.options).map(o => o.text).slice(0,20)
-                      : [],
-                  }))
-                const submitBtn = f.querySelector('[type="submit"],button[type="submit"],button:not([type])')
-                return {
-                  action: f.action || '',
-                  method: f.method || 'get',
-                  fields,
-                  submitLabel: submitBtn?.textContent?.trim() ?? '',
-                }
-              })
-            })()`)
-
-            if (Array.isArray(formsResult.value)) {
-              const forms = formsResult.value as Array<{
-                action: string
-                method: string
-                submitLabel: string
-                fields: Array<{
-                  tag: string; inputType: string; name: string; id: string
-                  placeholder: string; required: boolean; autocomplete: string
-                  label: string; options: string[]
-                }>
-              }>
-
-              for (let fi = 0; fi < forms.length; fi++) {
-                const form = forms[fi]
-                const purpose = inferFormPurpose(form.action, form.fields)
-                const fId = formId(pageSlug, fi)
-
-                const { nodeId: formNodeId } = await addNode(
-                  purpose,
-                  'form',
-                  {
-                    parentPageId: mainNodeId,
-                    action: form.action,
-                    method: form.method.toUpperCase(),
-                    purpose,
-                    submitLabel: form.submitLabel,
-                    fieldCount: form.fields.length,
-                    discoveredAt: nowISO(),
-                  },
-                  sessionId,
-                )
-                await addEdge(mainNodeId, formNodeId, 'contains', { formIndex: fi }, sessionId)
-
-                // Add form submission as api_call node if action looks like an endpoint
-                if (form.action && (form.action.startsWith('http') || form.action.startsWith('/'))) {
-                  const acId = apiCallId(pageSlug, form.method.toUpperCase(), form.action)
-                  const { nodeId: acNodeId } = await addNode(
-                    `${form.method.toUpperCase()} ${form.action}`,
-                    'api_call',
-                    {
-                      parentPageId: mainNodeId,
-                      method: form.method.toUpperCase(),
-                      endpoint: form.action,
-                      inferredPurpose: purpose,
-                      triggerSource: formNodeId,
-                      payloadKeys: form.fields.map(f => f.name).filter(Boolean),
-                      discoveredAt: nowISO(),
-                    },
-                    sessionId,
-                  )
-                  await addEdge(formNodeId, acNodeId, 'submits_to', {}, sessionId)
-                }
-
-                // Add field nodes
-                for (let fli = 0; fli < form.fields.length; fli++) {
-                  const field = form.fields[fli]
-                  if (field.inputType === 'hidden' || field.inputType === 'submit') continue
-                  const flId = fieldId(fId, field.name || String(fli))
-
-                  const { nodeId: fieldNodeId } = await addNode(
-                    field.label || field.name || field.placeholder || field.inputType,
-                    'field',
-                    {
-                      parentFormId: formNodeId,
-                      parentPageId: mainNodeId,
-                      inputType: field.inputType,
-                      name: field.name || undefined,
-                      label: field.label || undefined,
-                      placeholder: field.placeholder || undefined,
-                      required: field.required,
-                      autocomplete: field.autocomplete || undefined,
-                      options: field.options.length > 0 ? field.options : undefined,
-                      discoveredAt: nowISO(),
-                    },
-                    sessionId,
-                  )
-                  await addEdge(formNodeId, fieldNodeId, 'contains', { fieldIndex: fli }, sessionId)
-                }
-              }
-            }
-          }
-        } catch { /* Phase 4 failed — continue */ }
-
-        // ── JS bundle node ────────────────────────────────────────────────────
-        if (framework || hasNextData || Object.keys(featureFlags).length > 0) {
-          try {
-            const { nodeId: jsBundleNodeId } = await addNode(
-              framework || 'JS Bundle',
-              'js_bundle',
-              {
-                parentPageId: mainNodeId,
-                framework: framework || undefined,
-                hasNextData,
-                featureFlags: Object.keys(featureFlags).length > 0 ? featureFlags : undefined,
-                discoveredAt: nowISO(),
-              },
-              sessionId,
-            )
-            await addEdge(mainNodeId, jsBundleNodeId, 'contains', {}, sessionId)
-          } catch { /* skip */ }
-        }
-
-        // ── localStorage / sessionStorage nodes ───────────────────────────────
-        const allStorageKeys = [
-          ...localStorageKeys.map(k => ({ k, type: 'localStorage' as const })),
-          ...sessionStorageKeys.map(k => ({ k, type: 'sessionStorage' as const })),
-        ]
-        for (const { k, type } of allStorageKeys.slice(0, 10)) {
-          try {
-            const lsId = localStorageNodeId(pageSlug, k)
-            const { nodeId: lsNodeId } = await addNode(k, 'local_storage', {
-              parentPageId: mainNodeId,
-              storageType: type,
-              key: k,
-              discoveredAt: nowISO(),
-            }, sessionId)
-            await addEdge(mainNodeId, lsNodeId, 'contains', { storageType: type }, sessionId)
-          } catch { /* skip */ }
-        }
-
-        // ── schema.org JSON-LD nodes ──────────────────────────────────────────
-        for (const block of schemaOrgBlocks) {
-          try {
-            const soId = schemaDotOrgId(pageSlug, block.type)
-            const { nodeId: soNodeId } = await addNode(block.type, 'schema_org', {
-              parentPageId: mainNodeId,
-              schemaType: block.type,
-              summary: block.summary,
-              discoveredAt: nowISO(),
-            }, sessionId)
-            await addEdge(mainNodeId, soNodeId, 'contains', {}, sessionId)
-          } catch { /* skip */ }
-        }
-
-        // ── API calls from Performance API ────────────────────────────────────
-        for (const endpoint of apiCallsObserved.slice(0, 10)) {
-          try {
-            const { nodeId: acNodeId } = await addNode(
-              `GET ${endpoint}`,
-              'api_call',
-              {
-                parentPageId: mainNodeId,
-                method: 'GET',
-                endpoint,
-                inferredPurpose: 'page load request',
-                discoveredAt: nowISO(),
-              },
-              sessionId,
-            )
-            await addEdge(mainNodeId, acNodeId, 'triggers', { phase: 'page-load' }, sessionId)
-          } catch { /* skip */ }
-        }
-
-        // ── Phase 7: getPageLinks — BFS discovery ─────────────────────────────
-        if (depth < args.maxDepth) {
-          const links = await ctx.browser.getPageLinks(pageId)
-          const sameSiteLinks = links
-            .map((l) => l.href)
-            .filter((h) => {
-              try { return new URL(h).origin === origin } catch { return false }
-            })
-            .filter((h, i, arr) => arr.indexOf(h) === i)
-
-          for (const link of sameSiteLinks) {
-            const { nodeId: linkedNodeId } = await addNode(
-              link,
-              'page',
-              { url: link, depth: depth + 1, status: 'queued' },
-              sessionId,
-            )
-            await addEdge(mainNodeId, linkedNodeId, 'navigates_to', { fromDepth: depth }, sessionId)
-
-            if (!bfsState.visited.has(link) && !bfsState.queue.includes(link)) {
-              bfsState.queue.push(link)
-              bfsState.depthMap.set(link, depth + 1)
-            }
-          }
-        }
-
-        await saveAllFormats(sessionId, mermaidDir)
-
-      } catch (err) {
-        bfsState.lastError = err instanceof Error ? err.message : String(err)
-        await addNode(
-          url,
-          'page',
-          { url, depth, error: bfsState.lastError, statusCode: 0 },
-          sessionId,
-        ).catch(() => {})
-        await saveAllFormats(sessionId, mermaidDir).catch(() => {})
-      } finally {
-        if (pageId !== undefined) {
-          try { await ctx.browser.closePage(pageId) } catch { /* ignore */ }
-        }
-      }
-    }
-
-    bfsState.status = 'done'
-
-    const [saveResult, summary] = await Promise.all([
-      saveAllFormats(sessionId, mermaidDir),
-      getSessionSummary(sessionId),
-    ])
-
-    bfsState.homeMMDPath = saveResult.homeMMDPath
-    bfsState.cwdMMDPath = saveResult.cwdMMDPath
-
-    response.text(
-      JSON.stringify(
-        {
-          status: 'done',
-          sessionId,
-          pagesVisited: bfsState.pagesVisited,
-          graph: {
-            nodes: summary.nodeCount,
-            edges: summary.edgeCount,
-            nodeTypes: summary.nodeTypes,
-          },
-          files: {
-            ndjson: { home: saveResult.homeNdjsonPath, cwd: saveResult.cwdNdjsonPath },
-            json: { home: saveResult.homeJsonPath, cwd: saveResult.cwdJsonPath },
-            mermaid: { home: saveResult.homeMMDPath, cwd: saveResult.cwdMMDPath },
-          },
-          note: [
-            'Semantic extraction complete.',
-            'Each page produced: page node + form/field nodes + action/api_call nodes + js_bundle + storage nodes.',
-            'Use graph_load to re-open. Use graph_query to inspect. Use graph_read to read files.',
-            'Paste .mmd at https://mermaid.live to visualise.',
-          ].join(' '),
-        },
-        null,
-        2,
-      ),
-    )
-  },
-})
-
-export const map_site_bfs_status = defineTool({
-  name: 'map_site_bfs_status',
-  description: 'Get the current status and file paths of an in-progress or completed map_site_start BFS crawl.',
-  approvalCategory: 'observation',
-  input: z.object({}),
-  async handler(_args, _ctx, response) {
-    if (!bfsState) {
-      response.text(JSON.stringify({ status: 'idle', message: 'No crawl started yet. Call map_site_start first.' }))
-      return
-    }
-
-    let summary = null
-    try {
-      summary = await getSessionSummary(bfsState.sessionId)
-    } catch { /* session may not exist yet */ }
-
-    response.text(
-      JSON.stringify(
-        {
-          status: bfsState.status,
-          sessionId: bfsState.sessionId,
-          rootUrl: bfsState.rootUrl,
-          pagesVisited: bfsState.pagesVisited,
-          queued: bfsState.queue.length,
-          elapsedMs: Date.now() - bfsState.startedAt,
-          lastError: bfsState.lastError,
-          files: {
-            ndjson: { home: bfsState.homePath, cwd: bfsState.cwdPath },
-            json: { home: bfsState.homeJsonPath, cwd: bfsState.cwdJsonPath },
-            mermaid: { home: bfsState.homeMMDPath, cwd: bfsState.cwdMMDPath },
-          },
-          graph: summary
-            ? { nodes: summary.nodeCount, edges: summary.edgeCount, nodeTypes: summary.nodeTypes }
-            : null,
-        },
-        null,
-        2,
-      ),
-    )
-  },
-})
-
-export const map_site_enqueue = defineTool({
-  name: 'map_site_enqueue',
-  description: 'Manually enqueue a URL into the active BFS crawl queue.',
-  approvalCategory: 'observation',
-  input: z.object({
-    url: z.string().describe('URL to add to the crawl queue'),
-  }),
-  async handler(args, _ctx, response) {
-    if (!bfsState || bfsState.status === 'done') {
-      response.text(JSON.stringify({ error: 'No active crawl. Run map_site_start first.' }))
-      return
-    }
-    if (!bfsState.visited.has(args.url) && !bfsState.queue.includes(args.url)) {
-      bfsState.queue.push(args.url)
-      bfsState.depthMap.set(args.url, 0)
-      response.text(JSON.stringify({ queued: true, url: args.url, sessionId: bfsState.sessionId }))
-    } else {
-      response.text(JSON.stringify({ queued: false, reason: 'Already visited or queued.', url: args.url }))
-    }
-  },
-})
+          dialogCount = dialogSearch.results.l
