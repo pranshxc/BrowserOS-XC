@@ -10,8 +10,11 @@
  *       • ~/.browseros/graphs/<session>.ndjson   (persistent home dir)
  *       • <cwd>/graphs/<session>.ndjson           (current working dir)
  *  5. saveAllFormats() writes .ndjson + .json + .mmd atomically — called
- *     automatically by map_site_start after every page crawled.
- *     No truncation happens anywhere — all data is written in full.
+ *     automatically by map_site_start. To avoid thrashing, full JSON+MMD
+ *     regeneration is throttled to every SAVE_INTERVAL pages; always runs
+ *     on final completion. NDJSON append still happens on every mutation.
+ *  6. Edge deduplication: identical (from, to, type) triples are written
+ *     once only. Duplicate addEdge calls are silently ignored.
  *
  * File format: newline-delimited JSON (NDJSON).
  *   Each line is either a node record or an edge record.
@@ -28,7 +31,7 @@
  *         actions: [ ...actionNodes ],
  *         popups: [ ...popupNodes ],
  *         nav_regions: [ ...navRegionNodes ],
- *         js_bundles:  [ ...jsBundleNodes ],
+ *         js_bundles: [ ...jsBundleNodes ],
  *         local_storage: [ ...localStorageNodes ],
  *         schema_org: [ ...schemaDotOrgNodes ],
  *         api_calls: [ ...apiCallNodes triggered at page level ],
@@ -37,18 +40,6 @@
  *     orphans: [ ...nodes not attached to any page ],
  *     edges: [ ...all edges ]
  *   }
- *
- * NOTE on export deduplication:
- *   Child nodes that are shared across multiple pages (e.g. a global search
- *   field referenced by every page's form) are emitted ONCE in the tree under
- *   the first parent that claims them, then skipped for all subsequent parents.
- *   Full data is always available via graph_query (reads raw NDJSON, no dedup).
- *
- * NOTE on api_call / js_bundle display labels in the JSON export:
- *   Raw URLs can be 300-800 chars and make the export unreadable. In the tree
- *   output, labels are truncated to 120 chars. The full URL is always preserved
- *   in meta.endpoint (api_call) or meta.src (js_bundle). graph_query returns
- *   the untruncated raw record.
  */
 
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
@@ -150,6 +141,15 @@ export interface SaveAllResult {
   edgeCount: number
 }
 
+// ─── Constants ────────────────────────────────────────────────────────────────────────
+
+/**
+ * How often (in pages crawled) to regenerate the full JSON + MMD exports.
+ * NDJSON appends on every mutation regardless. Set to 1 to match old behaviour.
+ * Issue 5 fix: was implicitly 1 (every page), raised to 10 to cut I/O by ~10×.
+ */
+export const SAVE_INTERVAL = 10
+
 // ─── Session state (minimal in-memory index only) ────────────────────────────────────────
 
 interface SessionIndex {
@@ -159,10 +159,14 @@ interface SessionIndex {
   nodeTypes: Record<string, number>
   edgeTypes: Record<string, number>
   nodeIds: Set<string>
+  /** Issue 9 fix: deduplicate edges by "from\x00to\x00type" key */
+  edgeIds: Set<string>
   homePath: string
   cwdPath: string
   createdAt: number
   updatedAt: number
+  /** Issue 5 fix: tracks pages processed since last full save */
+  pagesSinceLastFullSave: number
 }
 
 const sessions = new Map<string, SessionIndex>()
@@ -231,10 +235,12 @@ export async function getOrCreateSession(sessionId?: string): Promise<SessionInd
     nodeTypes: {},
     edgeTypes: {},
     nodeIds: new Set(),
+    edgeIds: new Set(),
     homePath: join(homeDir, sessionFileName(id)),
     cwdPath: join(cwdDir, sessionFileName(id)),
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    pagesSinceLastFullSave: 0,
   }
 
   sessions.set(id, index)
@@ -309,6 +315,13 @@ export async function addEdge(
 ): Promise<{ sessionId: string; homePath: string; cwdPath: string }> {
   const index = await getOrCreateSession(sessionId)
 
+  // Issue 9 fix: deduplicate edges by (from, to, type) triple
+  const edgeKey = `${from}\x00${to}\x00${type}`
+  if (index.edgeIds.has(edgeKey)) {
+    return { sessionId: index.sessionId, homePath: index.homePath, cwdPath: index.cwdPath }
+  }
+  index.edgeIds.add(edgeKey)
+
   const record: GraphEdge = {
     kind: 'edge',
     from,
@@ -379,21 +392,10 @@ export async function queryGraph(
     raw = await readFile(index.cwdPath, 'utf-8')
   }
 
-  // Deduplicate nodes by ID when reading (last-write-wins), edges are kept all
-  const nodeMap = new Map<string, GraphNode>()
-  const allEdges: GraphEdge[] = []
-
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue
-    const r = JSON.parse(line) as GraphRecord
-    if (r.kind === 'node') nodeMap.set(r.id, r)
-    else allEdges.push(r)
-  }
-
-  const allRecords: GraphRecord[] = [
-    ...nodeMap.values(),
-    ...allEdges,
-  ]
+  const allRecords: GraphRecord[] = raw
+    .split('\n')
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as GraphRecord)
 
   const filtered = allRecords.filter((r) => {
     if (filter?.kind && r.kind !== filter.kind) return false
@@ -443,23 +445,6 @@ async function readAllRecords(
   return { nodes, edges }
 }
 
-// ─── Export helpers ────────────────────────────────────────────────────────────────────
-
-/**
- * Truncate a label for use in the JSON tree export.
- * api_call and js_bundle labels are raw URLs which can be 300-800 chars.
- * We strip the query string from the display label (full URL is in meta).
- * All other labels are truncated to 120 chars.
- */
-function exportLabel(label: string, type: NodeType): string {
-  if (type === 'api_call' || type === 'js_bundle' || type === 'graphql_api') {
-    // Strip query string for readability; full URL is in meta.endpoint / meta.src
-    const noQuery = label.split('?')[0]
-    return noQuery.length > 120 ? `${noQuery.slice(0, 117)}...` : noQuery
-  }
-  return label.length > 120 ? `${label.slice(0, 117)}...` : label
-}
-
 // ─── Export full graph to hierarchical tree JSON ───────────────────────────────────────
 //
 // Produces a page-rooted tree:
@@ -484,12 +469,6 @@ function exportLabel(label: string, type: NodeType): string {
 //   },
 //   orphans: [ ...nodes not attached to any page ],
 //   edges: [ ...all edges, with inline from/to/type/meta ]
-//
-// DEDUP NOTE: child nodes shared across multiple parent pages (e.g. a global
-// search field) appear ONCE in the tree under their first parent. Subsequent
-// parents that reference the same child ID via a 'contains' edge will have the
-// child silently skipped (already emitted). Full data always available via
-// graph_query which reads raw NDJSON.
 
 export async function exportGraph(sessionId?: string): Promise<{
   homeJsonPath: string
@@ -526,11 +505,6 @@ export async function exportGraph(sessionId?: string): Promise<{
   // Collect page nodes
   const pageNodes = [...nodeMap.values()].filter(n => n.type === 'page')
 
-  // Track child IDs that have already been emitted in the tree.
-  // Prevents the same shared node (e.g. fieldSearch) from appearing under
-  // every page that links to it via a contains edge.
-  const emittedChildIds = new Set<string>()
-
   // Build page tree
   const pagesTree: Record<string, unknown> = {}
 
@@ -547,36 +521,28 @@ export async function exportGraph(sessionId?: string): Promise<{
     const apiCalls: unknown[] = []
 
     for (const childId of pageChildIds) {
-      // Skip children already emitted under a previous page
-      if (emittedChildIds.has(childId)) continue
-      emittedChildIds.add(childId)
-
       const child = nodeMap.get(childId)
       if (!child) continue
 
       switch (child.type) {
         case 'form': {
-          // Build form subtree with its fields + api_calls
           const formChildIds = childrenOf.get(child.id) ?? []
           const fields: unknown[] = []
           const formApiCalls: unknown[] = []
 
           for (const fcId of formChildIds) {
-            if (emittedChildIds.has(fcId)) continue
-            emittedChildIds.add(fcId)
-
             const fc = nodeMap.get(fcId)
             if (!fc) continue
             if (fc.type === 'field') {
-              fields.push({ id: fc.id, label: exportLabel(fc.label, fc.type), meta: fc.meta })
+              fields.push({ id: fc.id, label: fc.label, meta: fc.meta })
             } else if (fc.type === 'api_call') {
-              formApiCalls.push({ id: fc.id, label: exportLabel(fc.label, fc.type), meta: fc.meta })
+              formApiCalls.push({ id: fc.id, label: fc.label, meta: fc.meta })
             }
           }
 
           forms[child.id] = {
             id: child.id,
-            label: exportLabel(child.label, child.type),
+            label: child.label,
             meta: child.meta,
             fields,
             api_calls: formApiCalls,
@@ -584,16 +550,16 @@ export async function exportGraph(sessionId?: string): Promise<{
           break
         }
         case 'action':
-          actions.push({ id: child.id, label: exportLabel(child.label, child.type), meta: child.meta })
+          actions.push({ id: child.id, label: child.label, meta: child.meta })
           break
         case 'popup':
-          popups.push({ id: child.id, label: exportLabel(child.label, child.type), meta: child.meta })
+          popups.push({ id: child.id, label: child.label, meta: child.meta })
           break
         case 'nav_region':
           navRegions.push({ id: child.id, label: child.label, meta: child.meta })
           break
         case 'js_bundle':
-          jsBundles.push({ id: child.id, label: exportLabel(child.label, child.type), meta: child.meta })
+          jsBundles.push({ id: child.id, label: child.label, meta: child.meta })
           break
         case 'local_storage':
           localStorage.push({ id: child.id, label: child.label, meta: child.meta })
@@ -602,7 +568,7 @@ export async function exportGraph(sessionId?: string): Promise<{
           schemaOrg.push({ id: child.id, label: child.label, meta: child.meta })
           break
         case 'api_call':
-          apiCalls.push({ id: child.id, label: exportLabel(child.label, child.type), meta: child.meta })
+          apiCalls.push({ id: child.id, label: child.label, meta: child.meta })
           break
       }
     }
@@ -629,7 +595,7 @@ export async function exportGraph(sessionId?: string): Promise<{
   }
   const orphans = [...nodeMap.values()].filter(
     n => n.type !== 'page' && !allChildIds.has(n.id)
-  ).map(n => ({ id: n.id, type: n.type, label: exportLabel(n.label, n.type), meta: n.meta }))
+  ).map(n => ({ id: n.id, type: n.type, label: n.label, meta: n.meta }))
 
   const output = {
     sessionId: id,
@@ -680,13 +646,7 @@ export async function exportMermaid(
 
   const lines: string[] = [`flowchart ${direction}`]
 
-  // Node type → Mermaid shape
-  // Shapes: [ ] = rectangle (page), ([ ]) = stadium (field/api_call),
-  //         { } = rhombus (action), [/ /] = parallelogram (flag),
-  //         (( )) = circle (popup), [[ ]] = subroutine (form),
-  //         > ] = asymmetric (route), {{ }} = hexagon (component)
   const shapeOpen: Record<string, string> = {
-    // Phase 11 semantic
     page:          '[',
     form:          '[[',
     field:         '([',
@@ -700,7 +660,6 @@ export async function exportMermaid(
     js_bundle:     '{{',
     local_storage: '[(',
     schema_org:    '[/',
-    // Legacy
     feature_flag:  '[/',
     graphql_api:   '((',
     redux_slice:   '[(',
@@ -742,9 +701,7 @@ export async function exportMermaid(
     lines.push(`  ${mmdId(node.id)}${open}"${mmdLabel(node.label)}"${close}`)
   }
 
-  // Edge type → Mermaid arrow style
   const arrowStyle: Record<string, string> = {
-    // Phase 11 semantic
     navigates_to:        '-->',
     contains:            '--contains-->',
     submits_to:          '==submits==>',
@@ -753,7 +710,6 @@ export async function exportMermaid(
     redirects_to:        '-.redirects.->',
     authenticates_with:  '==auth==>',
     auth_gate:           '-. auth_gate .->',
-    // Legacy
     uses_flag:           '-. uses_flag .->',
     calls_api:           '==>',
     reads_state:         '-. reads_state .->',
@@ -781,10 +737,17 @@ export async function exportMermaid(
 }
 
 // ─── saveAllFormats — write NDJSON + JSON + MMD in one atomic call ───────────────────────────
+//
+// Issue 5 fix: accepts a `force` flag. When false (the default used inside the BFS
+// per-page loop), the full JSON+MMD regeneration is skipped unless SAVE_INTERVAL
+// pages have accumulated since the last full save. NDJSON is always up-to-date
+// (append-on-every-mutation). Pass force=true on crawl completion to guarantee a
+// final consistent snapshot.
 
 export async function saveAllFormats(
   sessionId?: string,
   direction: 'TD' | 'LR' = 'LR',
+  force = false,
 ): Promise<SaveAllResult> {
   const id = sessionId ?? activeSessionId
   if (!id || !sessions.has(id)) {
@@ -793,6 +756,28 @@ export async function saveAllFormats(
     )
   }
   const index = sessions.get(id)!
+
+  index.pagesSinceLastFullSave++
+
+  const shouldRunFull = force || index.pagesSinceLastFullSave >= SAVE_INTERVAL
+
+  if (!shouldRunFull) {
+    // Return current paths without rebuilding JSON/MMD
+    const homeDir = getHomeGraphsDir()
+    const cwdDir = getCwdGraphsDir()
+    return {
+      homeNdjsonPath: index.homePath,
+      cwdNdjsonPath: index.cwdPath,
+      homeJsonPath: join(homeDir, sessionJsonFileName(id)),
+      cwdJsonPath: join(cwdDir, sessionJsonFileName(id)),
+      homeMMDPath: join(homeDir, sessionMmdFileName(id)),
+      cwdMMDPath: join(cwdDir, sessionMmdFileName(id)),
+      nodeCount: index.nodeCount,
+      edgeCount: index.edgeCount,
+    }
+  }
+
+  index.pagesSinceLastFullSave = 0
 
   const [jsonResult, mmdResult] = await Promise.all([
     exportGraph(id),
@@ -896,6 +881,7 @@ export async function loadSessionFromDisk(sessionId: string): Promise<GraphSumma
     .map((l) => JSON.parse(l) as GraphRecord)
 
   const nodeIds = new Set<string>()
+  const edgeIds = new Set<string>()
   const nodeTypes: Record<string, number> = {}
   const edgeTypes: Record<string, number> = {}
   let edgeCount = 0
@@ -907,8 +893,12 @@ export async function loadSessionFromDisk(sessionId: string): Promise<GraphSumma
         nodeTypes[r.type] = (nodeTypes[r.type] ?? 0) + 1
       }
     } else {
-      edgeCount++
-      edgeTypes[r.type] = (edgeTypes[r.type] ?? 0) + 1
+      const edgeKey = `${r.from}\x00${r.to}\x00${r.type}`
+      if (!edgeIds.has(edgeKey)) {
+        edgeIds.add(edgeKey)
+        edgeCount++
+        edgeTypes[r.type] = (edgeTypes[r.type] ?? 0) + 1
+      }
     }
   }
 
@@ -922,10 +912,12 @@ export async function loadSessionFromDisk(sessionId: string): Promise<GraphSumma
     nodeTypes,
     edgeTypes,
     nodeIds,
+    edgeIds,
     homePath,
     cwdPath,
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    pagesSinceLastFullSave: 0,
   }
 
   sessions.set(sessionId, index)

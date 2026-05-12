@@ -11,6 +11,18 @@ export const graph_query = defineTool({
     'Filter by kind (node or edge) and/or type.',
     'Use hasMore + page_num to iterate through all results.',
     'Omit page_num and per_page to use defaults (page 1, 50 items).',
+    '',
+    'Valid node types (Phase 11 semantic):',
+    '  page, form, field, action, api_call, popup, nav_region, content_block,',
+    '  error_state, auth_gate, js_bundle, local_storage, schema_org',
+    'Valid node types (legacy, preserved for backwards compatibility):',
+    '  feature_flag, graphql_api, redux_slice, route, component, generic',
+    '',
+    'Valid edge types (Phase 11 semantic):',
+    '  navigates_to, contains, submits_to, triggers, validates_via,',
+    '  redirects_to, authenticates_with, auth_gate',
+    'Valid edge types (legacy):',
+    '  uses_flag, calls_api, reads_state, renders, related, generic',
   ].join(' '),
   approvalCategory: 'read',
   input: z.object({
@@ -26,8 +38,12 @@ export const graph_query = defineTool({
       .string()
       .optional()
       .describe(
-        'Filter by node type (page, feature_flag, graphql_api, redux_slice, route, component, generic) ' +
-        'or edge type (navigates_to, uses_flag, calls_api, reads_state, renders, related, generic). Omit for all types.',
+        'Filter by node type: page | form | field | action | api_call | popup | nav_region | ' +
+        'content_block | error_state | auth_gate | js_bundle | local_storage | schema_org | ' +
+        'feature_flag | graphql_api | redux_slice | route | component | generic. ' +
+        'Or edge type: navigates_to | contains | submits_to | triggers | validates_via | ' +
+        'redirects_to | authenticates_with | auth_gate | uses_flag | calls_api | reads_state | ' +
+        'renders | related | generic. Omit to return all types.',
       ),
     page_num: z
       .coerce.number()
