@@ -90,6 +90,8 @@ import {
 } from './xc/graph/graph-tools'
 import {
   map_site_start,
+  map_site_resume,
+  map_site_provide_credentials,
   map_site_bfs_status,
   map_site_enqueue,
 } from './xc/graph/map-site-skill'
@@ -303,8 +305,10 @@ export const registry = createRegistry([
   graph_add_api,
   graph_add_workflow,
 
-  // Site mapping — BFS crawler (3)
+  // Site mapping — BFS crawler (5)
   map_site_start,
+  map_site_resume,
+  map_site_provide_credentials,
   map_site_bfs_status,
   map_site_enqueue,
 
