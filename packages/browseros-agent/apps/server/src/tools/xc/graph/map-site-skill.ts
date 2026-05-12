@@ -87,6 +87,13 @@ const EXHAUSTIVE_DEFAULT_HARD_ABORT = 2000
 /** Progress checkpoint interval in exhaustive mode. */
 const EXHAUSTIVE_PROGRESS_INTERVAL = 25
 
+/**
+ * BUG 3 FIX: Use a finite sentinel instead of Infinity so JSON.stringify
+ * never produces `null` for maxPages/maxDepth in exhaustive mode.
+ * 999_999 is an effective infinity — hardAbortAfter (default 2000) fires first.
+ */
+const MAX_PAGES_SENTINEL = 999_999
+
 // ─── Auth session state ───────────────────────────────────────────────────────────
 
 interface AuthSession {
@@ -113,8 +120,9 @@ interface BfsState {
   /** O(1) queue membership check (replaces queue.includes). */
   queued: Set<string>
   queue: string[]
+  /** Effective page depth limit. MAX_PAGES_SENTINEL in exhaustive mode. */
   maxDepth: number
-  /** Effective page cap. In exhaustive mode this is set to Infinity. */
+  /** Effective page cap. MAX_PAGES_SENTINEL in exhaustive mode. */
   maxPages: number
   /** Hard safety limit for exhaustive mode. */
   hardAbortAfter: number
@@ -134,9 +142,10 @@ interface BfsState {
   authMode: 'none' | 'ask' | 'credentials'
   auth: AuthSession
   mermaidDir: 'LR' | 'TD'
-  /** Stored ctx.browser handle so resume tools can continue crawling. */
-  ctx: unknown
-  response: unknown
+  // BUG 1 FIX: ctx and response removed from BfsState.
+  // They were stored but never read back — runBfsLoop receives response as a
+  // live parameter on every call. Keeping closed handles on the state caused
+  // map_site_resume to write to the already-finished map_site_start stream.
 }
 
 let bfsState: BfsState | null = null
@@ -237,6 +246,20 @@ function isAuthWall(
   if (/^(sign in|log in|login|sign into|log into|welcome back|authenticate)/.test(text)) return true
 
   return false
+}
+
+/**
+ * BUG 2 FIX: Safe progress emitter.
+ * Wraps response.progress() in try/catch so that runtimes which do not expose
+ * .progress on the map_site_resume / map_site_provide_credentials response
+ * object cannot corrupt the tool output envelope mid-stream.
+ */
+function safeProgress(response: { progress?: (msg: string) => void }, msg: string): void {
+  try {
+    if (typeof response.progress === 'function') {
+      response.progress(msg)
+    }
+  } catch { /* never let progress emission crash the crawl */ }
 }
 
 // ─── Auto-login helper ───────────────────────────────────────────────────────────────
@@ -379,7 +402,6 @@ async function processBfsPage(
 ): Promise<'ok' | 'auth-wall'> {
   const depth = state.depthMap.get(url) ?? 0
   let pageId: number | undefined
-  const pageSlug = slugify(url)
   const sessionId = state.sessionId
   const mermaidDir = state.mermaidDir
 
@@ -778,9 +800,12 @@ async function runBfsLoop(
     state.visited.add(url)
     state.pagesVisited++
 
-    // Exhaustive mode: emit a progress checkpoint every N pages
+    // Exhaustive mode: emit a progress checkpoint every N pages.
+    // BUG 2 FIX: use safeProgress() — response.progress may not exist on
+    // map_site_resume / map_site_provide_credentials response objects.
     if (state.exhaustive && state.pagesVisited % EXHAUSTIVE_PROGRESS_INTERVAL === 0) {
-      response.progress?.(
+      safeProgress(
+        response,
         `[map_site] exhaustive crawl: ${state.pagesVisited} pages visited, ${state.queue.length} queued — session ${state.sessionId}`,
       )
     }
@@ -855,7 +880,7 @@ export const map_site_start = defineTool({
     '  Phase 7: getPageLinks — BFS link discovery',
     '',
     'REQUIRED: url.',
-    'OPTIONAL: maxDepth (1-5, default 2; ignored in exhaustive mode),',
+    'OPTIONAL: maxDepth (1-10, default 2; ignored in exhaustive mode),',
     '  maxPages (default 50; ignored when exhaustive=true),',
     '  exhaustive (bool, default false),',
     '  hardAbortAfter (default 2000, only relevant when exhaustive=true),',
@@ -906,14 +931,16 @@ export const map_site_start = defineTool({
       }
     }
 
+    // BUG 3 FIX: Use MAX_PAGES_SENTINEL instead of Infinity so JSON.stringify
+    // never serialises these fields as `null`.
     bfsState = {
       sessionId,
       rootUrl: args.url,
       visited: new Set(),
       queued: new Set([args.url]),
       queue: [args.url],
-      maxDepth: args.exhaustive ? Infinity : args.maxDepth,
-      maxPages: args.exhaustive ? Infinity : args.maxPages,
+      maxDepth: args.exhaustive ? MAX_PAGES_SENTINEL : args.maxDepth,
+      maxPages: args.exhaustive ? MAX_PAGES_SENTINEL : args.maxPages,
       hardAbortAfter: args.hardAbortAfter,
       depthMap: new Map([[args.url, 0]]),
       status: 'running',
@@ -940,13 +967,18 @@ export const map_site_start = defineTool({
         authWallsSeen: 0,
       },
       mermaidDir,
-      ctx,
-      response,
+      // BUG 1 FIX: ctx and response are NOT stored on bfsState.
+      // runBfsLoop receives response as a live parameter on every call.
     }
 
     await addNode('Root', 'page', { url: args.url, depth: 0 }, sessionId)
 
-    await runBfsLoop(bfsState, ctx.browser as Parameters<typeof processBfsPage>[2], origin, response as { progress?: (msg: string) => void })
+    await runBfsLoop(
+      bfsState,
+      ctx.browser as Parameters<typeof processBfsPage>[2],
+      origin,
+      response as { progress?: (msg: string) => void },
+    )
 
     if (bfsState.status === 'paused') {
       response.text(JSON.stringify({
@@ -1036,6 +1068,8 @@ export const map_site_resume = defineTool({
 
     const origin = (() => { try { return new URL(bfsState.rootUrl).origin } catch { return bfsState.rootUrl } })()
 
+    // BUG 1 FIX: Pass the LIVE response from this handler call — never use
+    // a stored response from a previous tool invocation.
     await runBfsLoop(
       bfsState,
       ctx.browser as Parameters<typeof processBfsPage>[2],
@@ -1134,6 +1168,7 @@ export const map_site_provide_credentials = defineTool({
 
     const origin = (() => { try { return new URL(bfsState.rootUrl).origin } catch { return bfsState.rootUrl } })()
 
+    // BUG 1 FIX: Pass the LIVE response from this handler call.
     await runBfsLoop(
       bfsState,
       ctx.browser as Parameters<typeof processBfsPage>[2],
@@ -1233,7 +1268,7 @@ export const map_site_enqueue = defineTool({
       response.text(JSON.stringify({ error: 'No active crawl. Run map_site_start first.' }))
       return
     }
-    const assignedDepth = args.depth ?? Math.max(0, Number.isFinite(bfsState.maxDepth) ? bfsState.maxDepth - 1 : 0)
+    const assignedDepth = args.depth ?? Math.max(0, bfsState.maxDepth < MAX_PAGES_SENTINEL ? bfsState.maxDepth - 1 : 0)
     if (!bfsState.visited.has(args.url) && !bfsState.queued.has(args.url)) {
       bfsState.queued.add(args.url)
       bfsState.queue.push(args.url)
