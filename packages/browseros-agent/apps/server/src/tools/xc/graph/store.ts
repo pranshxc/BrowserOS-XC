@@ -28,7 +28,7 @@
  *         actions: [ ...actionNodes ],
  *         popups: [ ...popupNodes ],
  *         nav_regions: [ ...navRegionNodes ],
- *         js_bundles: [ ...jsBundleNodes ],
+ *         js_bundles:  [ ...jsBundleNodes ],
  *         local_storage: [ ...localStorageNodes ],
  *         schema_org: [ ...schemaDotOrgNodes ],
  *         api_calls: [ ...apiCallNodes triggered at page level ],
@@ -37,6 +37,18 @@
  *     orphans: [ ...nodes not attached to any page ],
  *     edges: [ ...all edges ]
  *   }
+ *
+ * NOTE on export deduplication:
+ *   Child nodes that are shared across multiple pages (e.g. a global search
+ *   field referenced by every page's form) are emitted ONCE in the tree under
+ *   the first parent that claims them, then skipped for all subsequent parents.
+ *   Full data is always available via graph_query (reads raw NDJSON, no dedup).
+ *
+ * NOTE on api_call / js_bundle display labels in the JSON export:
+ *   Raw URLs can be 300-800 chars and make the export unreadable. In the tree
+ *   output, labels are truncated to 120 chars. The full URL is always preserved
+ *   in meta.endpoint (api_call) or meta.src (js_bundle). graph_query returns
+ *   the untruncated raw record.
  */
 
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
@@ -192,7 +204,7 @@ export function generateSessionId(): string {
     String(now.getDate()).padStart(2, '0'),
     '-',
     String(now.getHours()).padStart(2, '0'),
-    String(now.getMinutes()).padStart(2, '0'),
+    String(now.getMinutes()).padStart(2, '00'),
     String(now.getSeconds()).padStart(2, '00'),
   ].join('')
   const rand = Math.random().toString(36).slice(2, 7)
@@ -367,10 +379,21 @@ export async function queryGraph(
     raw = await readFile(index.cwdPath, 'utf-8')
   }
 
-  const allRecords: GraphRecord[] = raw
-    .split('\n')
-    .filter((l) => l.trim().length > 0)
-    .map((l) => JSON.parse(l) as GraphRecord)
+  // Deduplicate nodes by ID when reading (last-write-wins), edges are kept all
+  const nodeMap = new Map<string, GraphNode>()
+  const allEdges: GraphEdge[] = []
+
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    const r = JSON.parse(line) as GraphRecord
+    if (r.kind === 'node') nodeMap.set(r.id, r)
+    else allEdges.push(r)
+  }
+
+  const allRecords: GraphRecord[] = [
+    ...nodeMap.values(),
+    ...allEdges,
+  ]
 
   const filtered = allRecords.filter((r) => {
     if (filter?.kind && r.kind !== filter.kind) return false
@@ -420,6 +443,23 @@ async function readAllRecords(
   return { nodes, edges }
 }
 
+// ─── Export helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Truncate a label for use in the JSON tree export.
+ * api_call and js_bundle labels are raw URLs which can be 300-800 chars.
+ * We strip the query string from the display label (full URL is in meta).
+ * All other labels are truncated to 120 chars.
+ */
+function exportLabel(label: string, type: NodeType): string {
+  if (type === 'api_call' || type === 'js_bundle' || type === 'graphql_api') {
+    // Strip query string for readability; full URL is in meta.endpoint / meta.src
+    const noQuery = label.split('?')[0]
+    return noQuery.length > 120 ? `${noQuery.slice(0, 117)}...` : noQuery
+  }
+  return label.length > 120 ? `${label.slice(0, 117)}...` : label
+}
+
 // ─── Export full graph to hierarchical tree JSON ───────────────────────────────────────
 //
 // Produces a page-rooted tree:
@@ -444,6 +484,12 @@ async function readAllRecords(
 //   },
 //   orphans: [ ...nodes not attached to any page ],
 //   edges: [ ...all edges, with inline from/to/type/meta ]
+//
+// DEDUP NOTE: child nodes shared across multiple parent pages (e.g. a global
+// search field) appear ONCE in the tree under their first parent. Subsequent
+// parents that reference the same child ID via a 'contains' edge will have the
+// child silently skipped (already emitted). Full data always available via
+// graph_query which reads raw NDJSON.
 
 export async function exportGraph(sessionId?: string): Promise<{
   homeJsonPath: string
@@ -466,10 +512,7 @@ export async function exportGraph(sessionId?: string): Promise<{
   for (const n of nodes) nodeMap.set(n.id, n)
 
   // Build parent→children index from 'contains' edges
-  // Edge: { from: parentId, to: childId, type: 'contains' }
   const childrenOf = new Map<string, string[]>()
-  // Also track form→field/api_call relationships
-  const formChildren = new Map<string, string[]>()
 
   for (const edge of edges) {
     if (edge.type === 'contains' || edge.type === 'submits_to' || edge.type === 'triggers') {
@@ -482,6 +525,11 @@ export async function exportGraph(sessionId?: string): Promise<{
 
   // Collect page nodes
   const pageNodes = [...nodeMap.values()].filter(n => n.type === 'page')
+
+  // Track child IDs that have already been emitted in the tree.
+  // Prevents the same shared node (e.g. fieldSearch) from appearing under
+  // every page that links to it via a contains edge.
+  const emittedChildIds = new Set<string>()
 
   // Build page tree
   const pagesTree: Record<string, unknown> = {}
@@ -499,6 +547,10 @@ export async function exportGraph(sessionId?: string): Promise<{
     const apiCalls: unknown[] = []
 
     for (const childId of pageChildIds) {
+      // Skip children already emitted under a previous page
+      if (emittedChildIds.has(childId)) continue
+      emittedChildIds.add(childId)
+
       const child = nodeMap.get(childId)
       if (!child) continue
 
@@ -510,18 +562,21 @@ export async function exportGraph(sessionId?: string): Promise<{
           const formApiCalls: unknown[] = []
 
           for (const fcId of formChildIds) {
+            if (emittedChildIds.has(fcId)) continue
+            emittedChildIds.add(fcId)
+
             const fc = nodeMap.get(fcId)
             if (!fc) continue
             if (fc.type === 'field') {
-              fields.push({ id: fc.id, label: fc.label, meta: fc.meta })
+              fields.push({ id: fc.id, label: exportLabel(fc.label, fc.type), meta: fc.meta })
             } else if (fc.type === 'api_call') {
-              formApiCalls.push({ id: fc.id, label: fc.label, meta: fc.meta })
+              formApiCalls.push({ id: fc.id, label: exportLabel(fc.label, fc.type), meta: fc.meta })
             }
           }
 
           forms[child.id] = {
             id: child.id,
-            label: child.label,
+            label: exportLabel(child.label, child.type),
             meta: child.meta,
             fields,
             api_calls: formApiCalls,
@@ -529,16 +584,16 @@ export async function exportGraph(sessionId?: string): Promise<{
           break
         }
         case 'action':
-          actions.push({ id: child.id, label: child.label, meta: child.meta })
+          actions.push({ id: child.id, label: exportLabel(child.label, child.type), meta: child.meta })
           break
         case 'popup':
-          popups.push({ id: child.id, label: child.label, meta: child.meta })
+          popups.push({ id: child.id, label: exportLabel(child.label, child.type), meta: child.meta })
           break
         case 'nav_region':
           navRegions.push({ id: child.id, label: child.label, meta: child.meta })
           break
         case 'js_bundle':
-          jsBundles.push({ id: child.id, label: child.label, meta: child.meta })
+          jsBundles.push({ id: child.id, label: exportLabel(child.label, child.type), meta: child.meta })
           break
         case 'local_storage':
           localStorage.push({ id: child.id, label: child.label, meta: child.meta })
@@ -547,7 +602,7 @@ export async function exportGraph(sessionId?: string): Promise<{
           schemaOrg.push({ id: child.id, label: child.label, meta: child.meta })
           break
         case 'api_call':
-          apiCalls.push({ id: child.id, label: child.label, meta: child.meta })
+          apiCalls.push({ id: child.id, label: exportLabel(child.label, child.type), meta: child.meta })
           break
       }
     }
@@ -574,7 +629,7 @@ export async function exportGraph(sessionId?: string): Promise<{
   }
   const orphans = [...nodeMap.values()].filter(
     n => n.type !== 'page' && !allChildIds.has(n.id)
-  ).map(n => ({ id: n.id, type: n.type, label: n.label, meta: n.meta }))
+  ).map(n => ({ id: n.id, type: n.type, label: exportLabel(n.label, n.type), meta: n.meta }))
 
   const output = {
     sessionId: id,
