@@ -776,11 +776,6 @@ async function processBfsPage(
     }
 
     // BUG 5 FIX: Throttle saveAllFormats(flush=false) to every SAVE_INTERVAL pages.
-    // Previously called on every page — O(n) file writes during a live streaming
-    // response window blocks the event loop long enough to trigger the stream
-    // frame watchdog ('malformed tool call data that could not be repaired').
-    // The final saveAllFormats(flush=true) in each handler's completion path
-    // is always called regardless and is unaffected by this throttle.
     if (state.pagesVisited % SAVE_INTERVAL === 0) {
       await saveAllFormats(sessionId, mermaidDir, false)
     }
@@ -788,7 +783,6 @@ async function processBfsPage(
   } catch (err) {
     state.lastError = err instanceof Error ? err.message : String(err)
     await addNode(url, 'page', { url, depth, error: state.lastError, statusCode: 0 }, sessionId).catch(() => {})
-    // Error-path save is always attempted regardless of SAVE_INTERVAL.
     await saveAllFormats(sessionId, mermaidDir, false).catch(() => {})
   } finally {
     if (pageId !== undefined) {
@@ -818,9 +812,6 @@ async function runBfsLoop(
     state.visited.add(url)
     state.pagesVisited++
 
-    // Exhaustive mode: emit a progress checkpoint every N pages.
-    // BUG 2 FIX: use safeProgress() — response.progress may not exist on
-    // map_site_resume / map_site_provide_credentials response objects.
     if (state.exhaustive && state.pagesVisited % EXHAUSTIVE_PROGRESS_INTERVAL === 0) {
       safeProgress(
         response,
@@ -832,7 +823,6 @@ async function runBfsLoop(
 
     if (result === 'auth-wall') {
       if (state.authMode === 'credentials' && state.auth.credentials) {
-        // Attempt auto-login
         const loginResult = await attemptAutoLogin(browser as Parameters<typeof attemptAutoLogin>[0], state.auth.credentials)
         if (loginResult.success) {
           state.auth.authenticated = true
@@ -840,13 +830,11 @@ async function runBfsLoop(
           if (loginResult.pageId >= 0) {
             try { await browser.closePage(loginResult.pageId) } catch {}
           }
-          // Re-queue the auth-wall URL now that we're authenticated
           if (!state.visited.has(url)) {
             state.queued.add(url)
             state.queue.unshift(url)
           }
         } else {
-          // Auto-login failed — fall through to 'ask' behaviour
           state.status = 'paused'
           state.pauseReason =
             `Auto-login failed: ${loginResult.error ?? 'unknown error'}. ` +
@@ -854,7 +842,6 @@ async function runBfsLoop(
           return
         }
       } else {
-        // authMode='ask': pause and wait for user
         state.status = 'paused'
         state.pauseReason =
           `Auth wall detected at: ${url}\n` +
@@ -869,64 +856,65 @@ async function runBfsLoop(
 
 export const map_site_start = defineTool({
   name: 'map_site_start',
+  // BUG 6 FIX: Use .join('\n') not .join(' ').
+  // .join(' ') collapsed the array into one ~900-char line with embedded
+  // double-quote chars (authMode=none/ask/credentials). At high context
+  // utilisation the tokenizer split the string mid-quote, producing an
+  // unterminated JSON string in the tool schema envelope, which caused the
+  // runtime to emit 'malformed tool call data that could not be repaired'
+  // before any handler ran. Also removed all embedded double-quote chars
+  // from description lines and field .describe() strings — they are a
+  // second tokenizer hazard inside JSON string values.
   description: [
-    'Autonomously BFS-crawl a website and build a rich semantic knowledge graph.',
+    'BFS-crawl a website and build a semantic knowledge graph.',
     '',
     'CRAWL MODES:',
-    '  Normal (default): respects maxPages cap (default 50). Stops at cap.',
-    '  Exhaustive (exhaustive=true): ignores maxPages, crawls until the BFS queue is',
-    '  completely empty — i.e. every reachable same-origin URL has been visited.',
-    '  Safety: hardAbortAfter (default 2000) stops truly unbounded crawls.',
-    '  Use exhaustive=true when you need 100% site coverage.',
+    '  Normal (default): respects maxPages cap (default 50).',
+    '  Exhaustive (exhaustive=true): crawls until queue empty — all reachable',
+    '  same-origin URLs visited. Safety: hardAbortAfter (default 2000).',
     '',
-    'AUTH MODES (for sites behind login):',
-    '  authMode="none" (default): records login pages but does not authenticate.',
-    '  authMode="ask": when a login wall is detected, the crawl PAUSES and asks the',
-    '  user to log in manually in the open browser tab, then call map_site_resume.',
-    '  All subsequent pages are crawled with the live authenticated session.',
-    '  authMode="credentials": supply loginUrl + credentials (email + password).',
-    '  The crawler auto-fills and submits the login form, then continues BFS.',
-    '  On auto-login failure falls back to "ask" behaviour.',
+    'AUTH MODES:',
+    "  authMode=none (default): records login pages, no authentication.",
+    "  authMode=ask: pauses when login wall detected, asks user to log in,",
+    '  then call map_site_resume to continue with authenticated session.',
+    "  authMode=credentials: supply loginUrl + email + password.",
+    '  Crawler auto-fills the form and resumes. Falls back to ask on failure.',
     '',
-    'EXTRACTION PHASES (per page, ctx.browser.* only — no Playwright):',
-    '  Phase 1: evaluate — title, h1, desc, pageRole, JSON-LD, localStorage, JS framework',
-    '  Phase 2: snapshot — interactive elements',
-    '  Phase 3: enhancedSnapshot — ARIA landmarks, dialogs, shadow DOM',
-    '  Phase 4: getDom("form") — full form/field extraction',
-    '  Phase 5: searchDom — dialogs, password fields',
-    '  Phase 6: evaluate — Performance API API call detection',
-    '  Phase 7: getPageLinks — BFS link discovery',
+    'EXTRACTION PHASES (per page, ctx.browser.* only):',
+    '  1: evaluate — title, h1, desc, pageRole, JSON-LD, localStorage, framework',
+    '  2: snapshot — interactive elements',
+    '  3: enhancedSnapshot — ARIA landmarks, dialogs, shadow DOM',
+    '  4: getDom(form) — full form/field extraction',
+    '  5: searchDom — dialogs, password fields',
+    '  6: evaluate — Performance API call detection',
+    '  7: getPageLinks — BFS link discovery',
     '',
     'REQUIRED: url.',
-    'OPTIONAL: maxDepth (1-10, default 2; ignored in exhaustive mode),',
-    '  maxPages (default 50; ignored when exhaustive=true),',
-    '  exhaustive (bool, default false),',
-    '  hardAbortAfter (default 2000, only relevant when exhaustive=true),',
-    '  authMode ("none"|"ask"|"credentials", default "none"),',
-    '  loginUrl (required when authMode="credentials"),',
-    '  loginEmail (required when authMode="credentials"),',
-    '  loginPassword (required when authMode="credentials"),',
+    'OPTIONAL: maxDepth (1-10, default 2), maxPages (default 50),',
+    '  exhaustive (bool), hardAbortAfter (default 2000),',
+    '  authMode (none|ask|credentials),',
+    '  loginUrl, loginEmail, loginPassword (required when authMode=credentials),',
     '  session_id, mermaid_direction (LR|TD).',
-  ].join(' '),
+  ].join('\n'),
   approvalCategory: 'observation',
   input: z.object({
     url: z.string().describe('Root URL to start crawling from'),
     maxDepth: z.coerce.number().int().min(1).max(10).default(2)
-      .describe('Maximum BFS depth (default: 2). Ignored in exhaustive mode.'),
+      .describe('Max BFS depth (default 2). Ignored in exhaustive mode.'),
     maxPages: z.coerce.number().int().min(1).max(100000).default(50)
-      .describe('Maximum pages to crawl (default: 50). Ignored when exhaustive=true.'),
+      .describe('Max pages to crawl (default 50). Ignored when exhaustive=true.'),
     exhaustive: z.boolean().default(false)
-      .describe('If true, crawl until BFS queue is empty (full site coverage). Overrides maxPages/maxDepth.'),
+      .describe('Crawl until BFS queue empty (full site coverage). Overrides maxPages/maxDepth.'),
     hardAbortAfter: z.coerce.number().int().min(1).default(EXHAUSTIVE_DEFAULT_HARD_ABORT)
-      .describe('Hard safety limit on pages crawled in exhaustive mode (default 2000).'),
+      .describe('Hard page limit in exhaustive mode (default 2000).'),
     authMode: z.enum(['none', 'ask', 'credentials']).default('none')
-      .describe('"none": no auth. "ask": pause and ask user to log in. "credentials": auto-fill login form.'),
+      .describe('none: no auth. ask: pause for manual login. credentials: auto-fill form.'),
     loginUrl: z.string().optional()
-      .describe('Login page URL. Required when authMode="credentials".'),
+      .describe('Login page URL. Required when authMode=credentials.'),
     loginEmail: z.string().optional()
-      .describe('Email or username. Required when authMode="credentials".'),
+      .describe('Email or username. Required when authMode=credentials.'),
     loginPassword: z.string().optional()
-      .describe('Password. Required when authMode="credentials".'),
+      .describe('Password. Required when authMode=credentials.'),
     session_id: z.string().optional()
       .describe('Graph session ID. Auto-generated from URL if omitted.'),
     mermaid_direction: z.enum(['LR', 'TD']).default('LR')
@@ -939,18 +927,15 @@ export const map_site_start = defineTool({
     const session = await getOrCreateSession(sessionId)
     const mermaidDir = (args.mermaid_direction ?? 'LR') as 'LR' | 'TD'
 
-    // Validate credentials mode
     if (args.authMode === 'credentials') {
       if (!args.loginUrl || !args.loginEmail || !args.loginPassword) {
         response.text(JSON.stringify({
-          error: 'authMode="credentials" requires loginUrl, loginEmail, and loginPassword.',
+          error: 'authMode=credentials requires loginUrl, loginEmail, and loginPassword.',
         }))
         return
       }
     }
 
-    // BUG 3 FIX: Use MAX_PAGES_SENTINEL instead of Infinity so JSON.stringify
-    // never serialises these fields as `null`.
     bfsState = {
       sessionId,
       rootUrl: args.url,
@@ -985,8 +970,6 @@ export const map_site_start = defineTool({
         authWallsSeen: 0,
       },
       mermaidDir,
-      // BUG 1 FIX: ctx and response are NOT stored on bfsState.
-      // runBfsLoop receives response as a live parameter on every call.
     }
 
     await addNode('Root', 'page', { url: args.url, depth: 0 }, sessionId)
@@ -1063,17 +1046,13 @@ export const map_site_resume = defineTool({
   name: 'map_site_resume',
   description: [
     'Resume a paused map_site_start crawl after manual authentication.',
-    'Call this after logging into the site manually in the browser tab.',
-    'The crawl will continue from where it paused, now authenticated.',
-    'Only valid when the crawl status is "paused".',
-  ].join(' '),
+    'Call this after logging into the site in the browser tab.',
+    'The crawl continues from where it paused with the authenticated session.',
+    'Only valid when crawl status is paused.',
+  ].join('\n'),
   approvalCategory: 'observation',
-  // BUG 4 FIX: z.object({}) produces an empty-properties JSON Schema which
-  // causes some LLM runtimes to generate a malformed tool call envelope
-  // (missing arguments key, empty string, or bare `{}`). Adding one optional
-  // _noop field forces a well-formed argument object. The handler ignores it.
   input: z.object({
-    _noop: z.string().optional().describe('Ignored. No input required for this tool.'),
+    _noop: z.string().optional().describe('Ignored. No input required.'),
   }),
   async handler(_args, ctx, response) {
     if (!bfsState) {
@@ -1092,8 +1071,6 @@ export const map_site_resume = defineTool({
 
     const origin = (() => { try { return new URL(bfsState.rootUrl).origin } catch { return bfsState.rootUrl } })()
 
-    // BUG 1 FIX: Pass the LIVE response from this handler call — never use
-    // a stored response from a previous tool invocation.
     await runBfsLoop(
       bfsState,
       ctx.browser as Parameters<typeof processBfsPage>[2],
@@ -1138,11 +1115,11 @@ export const map_site_resume = defineTool({
 export const map_site_provide_credentials = defineTool({
   name: 'map_site_provide_credentials',
   description: [
-    'Supply login credentials to a paused crawl (authMode="ask") so the agent can',
-    'auto-fill the login form and resume without needing manual browser interaction.',
-    'Call this when the crawl is paused and the user provides their email+password.',
-    'The agent will attempt to auto-fill and submit the login form, then resume BFS.',
-  ].join(' '),
+    'Supply login credentials to a paused crawl so the agent can auto-fill',
+    'the login form and resume without manual browser interaction.',
+    'Call when crawl is paused and user provides email+password.',
+    'Agent auto-fills and submits the form, then resumes BFS.',
+  ].join('\n'),
   approvalCategory: 'observation',
   input: z.object({
     email: z.string().describe('Email address or username for the login form'),
@@ -1192,7 +1169,6 @@ export const map_site_provide_credentials = defineTool({
 
     const origin = (() => { try { return new URL(bfsState.rootUrl).origin } catch { return bfsState.rootUrl } })()
 
-    // BUG 1 FIX: Pass the LIVE response from this handler call.
     await runBfsLoop(
       bfsState,
       ctx.browser as Parameters<typeof processBfsPage>[2],
@@ -1235,12 +1211,10 @@ export const map_site_provide_credentials = defineTool({
 
 export const map_site_bfs_status = defineTool({
   name: 'map_site_bfs_status',
-  description: 'Get the current status, auth state, and file paths of an in-progress or completed map_site_start BFS crawl.',
+  description: 'Get status, auth state, and file paths of an in-progress or completed map_site_start crawl.',
   approvalCategory: 'observation',
-  // BUG 4 FIX: same as map_site_resume — z.object({}) causes malformed tool
-  // call envelopes on some runtimes. _noop field forces a well-formed object.
   input: z.object({
-    _noop: z.string().optional().describe('Ignored. No input required for this tool.'),
+    _noop: z.string().optional().describe('Ignored. No input required.'),
   }),
   async handler(_args, _ctx, response) {
     if (!bfsState) {
@@ -1289,7 +1263,7 @@ export const map_site_enqueue = defineTool({
   input: z.object({
     url: z.string().describe('URL to add to the crawl queue'),
     depth: z.coerce.number().int().min(0).optional()
-      .describe('Depth to assign. Defaults to maxDepth-1 to prevent unbounded sub-crawl expansion.'),
+      .describe('Depth to assign. Defaults to maxDepth-1.'),
   }),
   async handler(args, _ctx, response) {
     if (!bfsState || bfsState.status === 'done') {
