@@ -116,7 +116,13 @@ interface AuthSession {
   loginPageId: number | null
   /** Credentials for auto-login (authMode='credentials'). */
   credentials: { loginUrl: string; email: string; password: string } | null
-  /** Number of auth-wall redirects seen (guards against redirect loops). */
+  /**
+   * BUG C FIX: authWallsSeen now resets to 0 after each successful auth.
+   * Previously it accumulated across the entire crawl lifetime, so after
+   * 3 total auth walls the guard (authWallsSeen < 3) permanently stopped
+   * triggering and post-auth pages matching login URL patterns were silently
+   * passed through, corrupting the graph.
+   */
   authWallsSeen: number
 }
 
@@ -827,6 +833,9 @@ async function runBfsLoop(
         if (loginResult.success) {
           state.auth.authenticated = true
           state.auth.method = 'auto'
+          // BUG C FIX: reset authWallsSeen after successful auth so per-domain
+          // auth walls that appear later in the crawl are not silently ignored.
+          state.auth.authWallsSeen = 0
           if (loginResult.pageId >= 0) {
             try { await browser.closePage(loginResult.pageId) } catch {}
           }
@@ -865,8 +874,21 @@ export const map_site_start = defineTool({
   // before any handler ran. Also removed all embedded double-quote chars
   // from description lines and field .describe() strings — they are a
   // second tokenizer hazard inside JSON string values.
+  //
+  // BUG A FIX: map_site_start now guards against overwriting a live paused
+  // or running bfsState. Context compaction was truncating the earlier tool
+  // result that contained status=paused, so the model had no evidence a
+  // crawl was in progress and called map_site_start again. The unconditional
+  // bfsState = {...} assignment then destroyed the paused session. Now the
+  // handler returns an explicit error with the session ID and instructs the
+  // model to call map_site_resume. A force=true param allows abandoning a
+  // genuinely stuck session when needed.
   description: [
     'BFS-crawl a website and build a semantic knowledge graph.',
+    '',
+    'IMPORTANT: If a crawl is already paused, call map_site_resume instead.',
+    'Calling map_site_start while a crawl is paused will be rejected unless',
+    'force=true is passed to explicitly abandon the existing session.',
     '',
     'CRAWL MODES:',
     '  Normal (default): respects maxPages cap (default 50).',
@@ -894,6 +916,7 @@ export const map_site_start = defineTool({
     '  exhaustive (bool), hardAbortAfter (default 2000),',
     '  authMode (none|ask|credentials),',
     '  loginUrl, loginEmail, loginPassword (required when authMode=credentials),',
+    '  force (bool, default false — set true to abandon a stuck paused session),',
     '  session_id, mermaid_direction (LR|TD).',
   ].join('\n'),
   approvalCategory: 'observation',
@@ -915,6 +938,9 @@ export const map_site_start = defineTool({
       .describe('Email or username. Required when authMode=credentials.'),
     loginPassword: z.string().optional()
       .describe('Password. Required when authMode=credentials.'),
+    // BUG A FIX: force param — allows explicitly abandoning a paused session.
+    force: z.boolean().default(false)
+      .describe('Set true to abandon an existing paused or stuck session and start fresh.'),
     session_id: z.string().optional()
       .describe('Graph session ID. Auto-generated from URL if omitted.'),
     mermaid_direction: z.enum(['LR', 'TD']).default('LR')
@@ -922,6 +948,25 @@ export const map_site_start = defineTool({
   }),
 
   async handler(args, ctx, response) {
+    // ── BUG A FIX: Guard against overwriting a live paused/running session ──
+    // Context compaction truncates earlier tool results, making the model
+    // unaware a crawl is paused. Without this guard, calling map_site_start
+    // again unconditionally destroyed the paused BFS state.
+    if (bfsState && (bfsState.status === 'paused' || bfsState.status === 'running') && !args.force) {
+      response.text(JSON.stringify({
+        error: 'A crawl session is already active.',
+        status: bfsState.status,
+        sessionId: bfsState.sessionId,
+        pagesVisited: bfsState.pagesVisited,
+        queuedRemaining: bfsState.queue.length,
+        pauseReason: bfsState.pauseReason ?? undefined,
+        action: bfsState.status === 'paused'
+          ? 'Call map_site_resume to continue this crawl, or pass force=true to abandon it and start fresh.'
+          : 'Call map_site_bfs_status to check progress, or pass force=true to abandon and start fresh.',
+      }, null, 2))
+      return
+    }
+
     const origin = (() => { try { return new URL(args.url).origin } catch { return args.url } })()
     const sessionId = args.session_id ?? urlToSessionId(args.url)
     const session = await getOrCreateSession(sessionId)
@@ -1049,11 +1094,17 @@ export const map_site_resume = defineTool({
     'Call this after logging into the site in the browser tab.',
     'The crawl continues from where it paused with the authenticated session.',
     'Only valid when crawl status is paused.',
+    'Takes no arguments.',
   ].join('\n'),
   approvalCategory: 'observation',
-  input: z.object({
-    _noop: z.string().optional().describe('Ignored. No input required.'),
-  }),
+  // BUG B FIX: Use z.object({}) instead of z.object({ _noop: z.string().optional() }).
+  // Some AI SDK runtime versions treat any schema that has a field — even an
+  // optional one — as requiring at least one argument to be present in the
+  // tool call JSON. When the model calls map_site_resume with zero args (the
+  // correct usage) the runtime rejects the call at schema validation before
+  // the handler runs, emitting the malformed tool call data error.
+  // z.object({}) accepts an empty call unconditionally.
+  input: z.object({}),
   async handler(_args, ctx, response) {
     if (!bfsState) {
       response.text(JSON.stringify({ error: 'No crawl in progress. Call map_site_start first.' }))
@@ -1068,6 +1119,10 @@ export const map_site_resume = defineTool({
     bfsState.auth.method = 'manual'
     bfsState.status = 'running'
     bfsState.pauseReason = null
+    // BUG C FIX: Reset authWallsSeen after successful manual auth so that
+    // subsequent per-domain auth walls (e.g. console.twilio.com vs twilio.com)
+    // are not silently ignored because the counter hit the 3-wall cap.
+    bfsState.auth.authWallsSeen = 0
 
     const origin = (() => { try { return new URL(bfsState.rootUrl).origin } catch { return bfsState.rootUrl } })()
 
@@ -1166,6 +1221,9 @@ export const map_site_provide_credentials = defineTool({
     bfsState.auth.credentials = credentials
     bfsState.status = 'running'
     bfsState.pauseReason = null
+    // BUG C FIX: Reset authWallsSeen after successful credential-based auth
+    // for the same reason as in map_site_resume.
+    bfsState.auth.authWallsSeen = 0
 
     const origin = (() => { try { return new URL(bfsState.rootUrl).origin } catch { return bfsState.rootUrl } })()
 
@@ -1213,9 +1271,8 @@ export const map_site_bfs_status = defineTool({
   name: 'map_site_bfs_status',
   description: 'Get status, auth state, and file paths of an in-progress or completed map_site_start crawl.',
   approvalCategory: 'observation',
-  input: z.object({
-    _noop: z.string().optional().describe('Ignored. No input required.'),
-  }),
+  // BUG B FIX: z.object({}) — same rationale as map_site_resume above.
+  input: z.object({}),
   async handler(_args, _ctx, response) {
     if (!bfsState) {
       response.text(JSON.stringify({ status: 'idle', message: 'No crawl started yet. Call map_site_start first.' }))
