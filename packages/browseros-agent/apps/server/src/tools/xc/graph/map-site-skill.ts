@@ -94,6 +94,15 @@ const EXHAUSTIVE_PROGRESS_INTERVAL = 25
  */
 const MAX_PAGES_SENTINEL = 999_999
 
+/**
+ * BUG 5 FIX: Throttle saveAllFormats(flush=false) calls to every N pages.
+ * Calling it on every single page causes massive async I/O inside an open
+ * streaming response window, triggering the stream frame watchdog.
+ * The final saveAllFormats(flush=true) in each handler's completion path
+ * is always called regardless.
+ */
+const SAVE_INTERVAL = 10
+
 // ─── Auth session state ───────────────────────────────────────────────────────────
 
 interface AuthSession {
@@ -766,11 +775,20 @@ async function processBfsPage(
       }
     }
 
-    await saveAllFormats(sessionId, mermaidDir, false)
+    // BUG 5 FIX: Throttle saveAllFormats(flush=false) to every SAVE_INTERVAL pages.
+    // Previously called on every page — O(n) file writes during a live streaming
+    // response window blocks the event loop long enough to trigger the stream
+    // frame watchdog ('malformed tool call data that could not be repaired').
+    // The final saveAllFormats(flush=true) in each handler's completion path
+    // is always called regardless and is unaffected by this throttle.
+    if (state.pagesVisited % SAVE_INTERVAL === 0) {
+      await saveAllFormats(sessionId, mermaidDir, false)
+    }
 
   } catch (err) {
     state.lastError = err instanceof Error ? err.message : String(err)
     await addNode(url, 'page', { url, depth, error: state.lastError, statusCode: 0 }, sessionId).catch(() => {})
+    // Error-path save is always attempted regardless of SAVE_INTERVAL.
     await saveAllFormats(sessionId, mermaidDir, false).catch(() => {})
   } finally {
     if (pageId !== undefined) {
@@ -1050,7 +1068,13 @@ export const map_site_resume = defineTool({
     'Only valid when the crawl status is "paused".',
   ].join(' '),
   approvalCategory: 'observation',
-  input: z.object({}),
+  // BUG 4 FIX: z.object({}) produces an empty-properties JSON Schema which
+  // causes some LLM runtimes to generate a malformed tool call envelope
+  // (missing arguments key, empty string, or bare `{}`). Adding one optional
+  // _noop field forces a well-formed argument object. The handler ignores it.
+  input: z.object({
+    _noop: z.string().optional().describe('Ignored. No input required for this tool.'),
+  }),
   async handler(_args, ctx, response) {
     if (!bfsState) {
       response.text(JSON.stringify({ error: 'No crawl in progress. Call map_site_start first.' }))
@@ -1213,7 +1237,11 @@ export const map_site_bfs_status = defineTool({
   name: 'map_site_bfs_status',
   description: 'Get the current status, auth state, and file paths of an in-progress or completed map_site_start BFS crawl.',
   approvalCategory: 'observation',
-  input: z.object({}),
+  // BUG 4 FIX: same as map_site_resume — z.object({}) causes malformed tool
+  // call envelopes on some runtimes. _noop field forces a well-formed object.
+  input: z.object({
+    _noop: z.string().optional().describe('Ignored. No input required for this tool.'),
+  }),
   async handler(_args, _ctx, response) {
     if (!bfsState) {
       response.text(JSON.stringify({ status: 'idle', message: 'No crawl started yet. Call map_site_start first.' }))
