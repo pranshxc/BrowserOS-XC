@@ -8,25 +8,6 @@
  *   eval_extract_graphql    — Apollo Client v2/v3 schema extraction
  *   eval_extract_redux      — Redux / Zustand / Jotai / MobX store snapshot
  *   eval_extract_i18n       — react-i18next / vue-i18n / FormatJS / window.i18n
- *
- * Architecture
- * ────────────
- * Each preset is a self-contained IIFE string that probes well-known
- * global variables and returns a structured result object.
- * All presets are safe (read-only), return JSON-serializable data,
- * handle missing frameworks gracefully (return { found: false, framework: null }),
- * and cap array sizes to avoid massive payloads.
- *
- * Preset strings are plain JS (no TS) so they can be sent verbatim to
- * CDP Runtime.evaluate without compilation.
- *
- * Value to AI agent
- * ─────────────────
- * eval_preset('extract_routes')  → complete client-side route table including hidden routes
- * eval_preset('extract_flags')   → features built but not yet shown in the UI
- * eval_preset('extract_graphql') → full API shape the app uses
- * eval_preset('extract_redux')   → exact data model (field names, types, shape)
- * eval_preset('extract_i18n')    → every feature string in the app (acts as a feature catalog)
  */
 
 import { z } from 'zod'
@@ -50,29 +31,22 @@ const PRESET_ROUTES = /* js */ `
 (function extractRoutes() {
   const result = { framework: null, routes: [], rawData: null };
 
-  // ── Next.js ──────────────────────────────────────────────────────────────────
-  // Next.js 13+ App Router
+  // Next.js App Router
   if (window.__next_router_utils) {
     result.framework = 'nextjs-app-router';
     try { result.rawData = window.__next_router_utils; } catch(e) {}
   }
-  // Next.js 12 Pages Router
+  // Next.js Pages Router
   if (!result.framework && window.__NEXT_DATA__) {
     result.framework = 'nextjs-pages';
     const nd = window.__NEXT_DATA__;
     result.routes = [{ path: nd.page, props: Object.keys(nd.props || {}) }];
-    // Try to get the router from __NEXT_DATA__ manifest
     try {
       if (window.next && window.next.router) {
         const router = window.next.router;
-        result.rawData = {
-          pathname: router.pathname,
-          query: router.query,
-          asPath: router.asPath,
-        };
+        result.rawData = { pathname: router.pathname, query: router.query, asPath: router.asPath };
       }
     } catch(e) {}
-    // Try __BUILD_MANIFEST for all page routes
     try {
       if (window.__BUILD_MANIFEST) {
         result.routes = Object.keys(window.__BUILD_MANIFEST.sortedPages || window.__BUILD_MANIFEST).slice(0, 500);
@@ -80,21 +54,17 @@ const PRESET_ROUTES = /* js */ `
     } catch(e) {}
   }
 
-  // ── React Router v5 ──────────────────────────────────────────────────────────
+  // React Router v5
   if (!result.framework) {
     try {
       const rr5 = window.__reactRouterContext || window.__routeContext;
-      if (rr5) {
-        result.framework = 'react-router-v5';
-        result.routes = rr5;
-      }
+      if (rr5) { result.framework = 'react-router-v5'; result.routes = rr5; }
     } catch(e) {}
   }
 
-  // ── React Router v6 / Remix ───────────────────────────────────────────────────
+  // React Router v6 / Remix
   if (!result.framework) {
     try {
-      // Walk React fiber to find RouterProvider's value
       function getFiberRoutes(el) {
         if (!el) return null;
         let fiber = el._reactFiber || el[Object.keys(el).find(k => k.startsWith('__reactFiber')) || ''];
@@ -107,9 +77,7 @@ const PRESET_ROUTES = /* js */ `
           const pending = node.pendingProps || {};
           const memoized = node.memoizedProps || {};
           const value = (node.memoizedState && node.memoizedState.element) || pending.value || memoized.value;
-          if (value && value.router && value.router.routes) {
-            return value.router.routes;
-          }
+          if (value && value.router && value.router.routes) return value.router.routes;
           if (pending.routes) return pending.routes;
           node = node.return;
         }
@@ -132,7 +100,7 @@ const PRESET_ROUTES = /* js */ `
     } catch(e) {}
   }
 
-  // ── TanStack Router ───────────────────────────────────────────────────────────
+  // TanStack Router
   if (!result.framework) {
     try {
       const ts = window.__TSR_ROUTER__ || window.__tanstack_router__;
@@ -143,10 +111,9 @@ const PRESET_ROUTES = /* js */ `
     } catch(e) {}
   }
 
-  // ── Vue Router ────────────────────────────────────────────────────────────────
+  // Vue Router
   if (!result.framework) {
     try {
-      // Vue 3: app.__vue_app__.config.globalProperties.$router
       const vueApps = document.querySelectorAll('[data-v-app]');
       for (const el of vueApps) {
         const app = el._vei || el.__vue_app__;
@@ -169,7 +136,7 @@ const PRESET_ROUTES = /* js */ `
     } catch(e) {}
   }
 
-  // ── Angular ───────────────────────────────────────────────────────────────────
+  // Angular
   if (!result.framework) {
     try {
       const ngEl = document.querySelector('[ng-version]') || document.querySelector('app-root');
@@ -177,7 +144,6 @@ const PRESET_ROUTES = /* js */ `
         const roots = window.getAllAngularRootElements();
         if (roots.length > 0) {
           result.framework = 'angular';
-          // Angular stores router config in the injector
           try {
             const injector = window.ng.getInjector(roots[0]);
             const router = injector.get(window.ng.core && window.ng.core.Router);
@@ -199,7 +165,7 @@ const PRESET_ROUTES = /* js */ `
     } catch(e) {}
   }
 
-  // ── SvelteKit ─────────────────────────────────────────────────────────────────
+  // SvelteKit
   if (!result.framework) {
     try {
       const sk = window.__sveltekit_data || window.sveltekit || window.__app;
@@ -210,9 +176,9 @@ const PRESET_ROUTES = /* js */ `
     } catch(e) {}
   }
 
-  // ── Generic window.__routes / window.routes ───────────────────────────────────
+  // Generic window.__routes
   if (!result.framework && (window.__routes || window.routes)) {
-    result.framework = 'custom (window.__routes)';
+    result.framework = 'custom';
     result.routes = window.__routes || window.routes;
   }
 
@@ -226,9 +192,8 @@ const PRESET_FEATURE_FLAGS = /* js */ `
 (function extractFeatureFlags() {
   const result = { providers: [], flags: {}, rawData: {} };
 
-  // ── LaunchDarkly ──────────────────────────────────────────────────────────────
+  // LaunchDarkly
   try {
-    // LDClient.allFlags() via global
     const ld = window.ldclient || window.LDClient || window.__ldclient__;
     if (ld && typeof ld.allFlags === 'function') {
       const flags = ld.allFlags();
@@ -236,18 +201,16 @@ const PRESET_FEATURE_FLAGS = /* js */ `
       Object.assign(result.flags, flags);
       result.rawData.launchDarkly = flags;
     }
-    // React SDK context
     if (window.__ld_context__ || window.__LD_CONTEXT__) {
       result.rawData.ldContext = window.__ld_context__ || window.__LD_CONTEXT__;
     }
   } catch(e) {}
 
-  // ── Statsig ───────────────────────────────────────────────────────────────────
+  // Statsig
   try {
     const sg = window.statsig || window.Statsig || window.__STATSIG__;
     if (sg) {
       result.providers.push('Statsig');
-      // statsig.getConfig / statsig.getFeatureGate
       const store = sg._store || sg.store || (sg._client && sg._client._store);
       if (store) {
         const gates = store.gates || store._gates || {};
@@ -260,7 +223,7 @@ const PRESET_FEATURE_FLAGS = /* js */ `
     }
   } catch(e) {}
 
-  // ── Unleash ───────────────────────────────────────────────────────────────────
+  // Unleash
   try {
     const ul = window.unleash || window.Unleash || window.__unleash__;
     if (ul) {
@@ -275,7 +238,7 @@ const PRESET_FEATURE_FLAGS = /* js */ `
     }
   } catch(e) {}
 
-  // ── GrowthBook ────────────────────────────────────────────────────────────────
+  // GrowthBook
   try {
     const gb = window.growthbook || window.GrowthBook || window.__growthbook__;
     if (gb) {
@@ -290,18 +253,18 @@ const PRESET_FEATURE_FLAGS = /* js */ `
     }
   } catch(e) {}
 
-  // ── Split.io ──────────────────────────────────────────────────────────────────
+  // Split.io
   try {
     const sp = window.splitio || window.__splitio__ || window.SplitFactory;
     if (sp) {
       result.providers.push('Split.io');
-      result.rawData.splitio = { detected: true, globalKey: Object.keys(window).filter(k => k.toLowerCase().includes('split')) };
+      result.rawData.splitio = { detected: true };
     }
   } catch(e) {}
 
-  // ── Optimizely ────────────────────────────────────────────────────────────────
+  // Optimizely
   try {
-    const op = window.optimizely || window.optlyX || window['optimizely-datafile'];
+    const op = window.optimizely || window.optlyX;
     if (op) {
       result.providers.push('Optimizely');
       const state = typeof op.get === 'function' ? op.get('state') : null;
@@ -315,12 +278,8 @@ const PRESET_FEATURE_FLAGS = /* js */ `
     }
   } catch(e) {}
 
-  // ── Custom: window.flags / window.featureFlags / window.FEATURE_FLAGS ─────────
-  const customSources = [
-    'flags', 'featureFlags', 'FEATURE_FLAGS', 'features', 'FEATURES',
-    '__flags__', '__features__', 'appFlags', 'FF', 'feature_flags',
-    '_flags', 'flagsmith',
-  ];
+  // Custom window.flags / featureFlags etc.
+  const customSources = ['flags','featureFlags','FEATURE_FLAGS','features','FEATURES','__flags__','__features__','appFlags','FF','feature_flags','_flags','flagsmith'];
   for (const key of customSources) {
     try {
       const val = window[key];
@@ -345,46 +304,31 @@ const PRESET_GRAPHQL = /* js */ `
 (function extractGraphQL() {
   const result = { found: false, client: null, schema: null, queries: [], types: [] };
 
-  // ── Apollo Client v3 ──────────────────────────────────────────────────────────
+  // Apollo Client v3
   try {
-    // Apollo DevTools hook
     const hook = window.__APOLLO_CLIENT__ || window.apolloClient;
     if (hook) {
       result.found = true;
       result.client = 'apollo-v3';
-      // Extract type policies / possible types
       const cache = hook.cache;
       if (cache) {
         const data = cache.extract ? cache.extract() : null;
         if (data) {
           const keys = Object.keys(data);
           result.types = [...new Set(keys.map(k => k.split(':')[0]).filter(t => t !== 'ROOT_QUERY' && t !== 'ROOT_MUTATION'))].slice(0, 100);
-          // ROOT_QUERY keys = all queries the app has run
           const rootQuery = data['ROOT_QUERY'] || {};
-          result.queries = Object.keys(rootQuery)
-            .filter(k => k !== '__typename')
-            .map(k => k.split('(')[0]) // strip args
-            .slice(0, 200);
+          result.queries = Object.keys(rootQuery).filter(k => k !== '__typename').map(k => k.split('(')[0]).slice(0, 200);
         }
-        // Type policies
         const typePolicies = cache.policies && cache.policies.config && cache.policies.config.typePolicies;
-        if (typePolicies) {
-          result.typePolicies = Object.keys(typePolicies);
-        }
+        if (typePolicies) result.typePolicies = Object.keys(typePolicies);
       }
-      // Extract schema if stored
-      if (hook.schema) {
-        result.schema = { detected: true, note: 'Schema object exists on client' };
-      }
-      // Possible types / fragment matcher
+      if (hook.schema) result.schema = { detected: true };
       const possibleTypes = hook.cache && hook.cache.config && hook.cache.config.possibleTypes;
-      if (possibleTypes) {
-        result.possibleTypes = possibleTypes;
-      }
+      if (possibleTypes) result.possibleTypes = possibleTypes;
     }
   } catch(e) {}
 
-  // ── Apollo Client v2 ──────────────────────────────────────────────────────────
+  // Apollo Client v2 SSR
   if (!result.found) {
     try {
       const hook2 = window.__APOLLO_STATE__ || (window.__NEXT_DATA__ && window.__NEXT_DATA__.props && window.__NEXT_DATA__.props.apolloState);
@@ -393,41 +337,30 @@ const PRESET_GRAPHQL = /* js */ `
         result.client = 'apollo-v2-ssr-state';
         const keys = Object.keys(hook2);
         result.types = [...new Set(keys.map(k => k.split(':')[0]))].slice(0, 100);
-        result.queries = keys.filter(k => k.startsWith('ROOT_QUERY')).length > 0
-          ? Object.keys(hook2['ROOT_QUERY'] || {})
-          : [];
+        result.queries = keys.filter(k => k.startsWith('ROOT_QUERY')).length > 0 ? Object.keys(hook2['ROOT_QUERY'] || {}) : [];
       }
     } catch(e) {}
   }
 
-  // ── Relay ─────────────────────────────────────────────────────────────────────
+  // Relay
   if (!result.found) {
     try {
       const relay = window.__RELAY_STORE__ || window.__relaySSRData__;
-      if (relay) {
-        result.found = true;
-        result.client = 'relay';
-        result.rawData = typeof relay === 'object' ? Object.keys(relay).slice(0, 100) : String(relay);
-      }
+      if (relay) { result.found = true; result.client = 'relay'; result.rawData = typeof relay === 'object' ? Object.keys(relay).slice(0, 100) : String(relay); }
     } catch(e) {}
   }
 
-  // ── URQL ──────────────────────────────────────────────────────────────────────
+  // URQL
   if (!result.found) {
     try {
       const urql = window.__URQL_DATA__ || window.urqlClient;
-      if (urql) {
-        result.found = true;
-        result.client = 'urql';
-      }
+      if (urql) { result.found = true; result.client = 'urql'; }
     } catch(e) {}
   }
 
-  // ── Generic: look for __schema in window ──────────────────────────────────────
+  // Generic __schema on window
   if (!result.schema) {
-    const schemaKeys = Object.keys(window).filter(k =>
-      k.includes('schema') || k.includes('Schema') || k.includes('SCHEMA')
-    );
+    const schemaKeys = Object.keys(window).filter(k => k.includes('schema') || k.includes('Schema') || k.includes('SCHEMA'));
     for (const k of schemaKeys) {
       try {
         const v = window[k];
@@ -455,22 +388,14 @@ const PRESET_REDUX = /* js */ `
 (function extractState() {
   const result = { stores: [], found: false };
 
-  // ── Redux DevTools Extension ──────────────────────────────────────────────────
+  // Redux DevTools
   try {
-    const devtools = window.__REDUX_DEVTOOLS_EXTENSION_COMPOSE__
-      || (window.__REDUX_DEVTOOLS_EXTENSION__ && window.__REDUX_DEVTOOLS_EXTENSION__)
-      || window.__redux_devtools_extension__;
-    if (devtools) {
-      result.found = true;
-      result.devtoolsPresent = true;
-    }
+    const devtools = window.__REDUX_DEVTOOLS_EXTENSION_COMPOSE__ || window.__REDUX_DEVTOOLS_EXTENSION__ || window.__redux_devtools_extension__;
+    if (devtools) { result.found = true; result.devtoolsPresent = true; }
   } catch(e) {}
 
-  // ── Redux store on window ─────────────────────────────────────────────────────
-  const storeKeys = [
-    'store', '__store__', 'reduxStore', '__REDUX_STORE__', 'appStore',
-    '_store', 'globalStore', 'rootStore',
-  ];
+  // Redux store on window
+  const storeKeys = ['store','__store__','reduxStore','__REDUX_STORE__','appStore','_store','globalStore','rootStore'];
   for (const key of storeKeys) {
     try {
       const s = window[key];
@@ -491,68 +416,45 @@ const PRESET_REDUX = /* js */ `
     } catch(e) {}
   }
 
-  // ── Zustand ───────────────────────────────────────────────────────────────────
+  // Zustand
   try {
-    // Zustand stores are closures; they can be found via __ZUSTAND__ or by
-    // walking React fiber for zustand context providers
-    const zKeys = Object.keys(window).filter(k =>
-      k.includes('zustand') || k.includes('Zustand') || k.includes('ZUSTAND')
-    );
+    const zKeys = Object.keys(window).filter(k => k.includes('zustand') || k.includes('Zustand') || k.includes('ZUSTAND'));
     for (const k of zKeys) {
       try {
         const store = window[k];
         if (store && typeof store.getState === 'function') {
           const state = store.getState();
-          result.stores.push({
-            source: 'window.' + k,
-            type: 'zustand',
-            stateKeys: Object.keys(state || {}).slice(0, 100),
-            state: JSON.parse(JSON.stringify(state, (k2, v) =>
-              typeof v === 'function' ? '[Function]' : v
-            )),
-          });
+          result.stores.push({ source: 'window.' + k, type: 'zustand', stateKeys: Object.keys(state || {}).slice(0, 100), state: JSON.parse(JSON.stringify(state, (k2, v) => typeof v === 'function' ? '[Function]' : v)) });
           result.found = true;
         }
       } catch(e) {}
     }
   } catch(e) {}
 
-  // ── Jotai ─────────────────────────────────────────────────────────────────────
+  // Jotai
   try {
     const jotai = window.jotaiStore || window.__jotai_store__ || window.__JOTAI_STORE__;
-    if (jotai) {
-      result.stores.push({ source: 'window.jotaiStore', type: 'jotai', detected: true });
-      result.found = true;
-    }
+    if (jotai) { result.stores.push({ source: 'window.jotaiStore', type: 'jotai', detected: true }); result.found = true; }
   } catch(e) {}
 
-  // ── MobX ──────────────────────────────────────────────────────────────────────
+  // MobX
   try {
-    const mobxKeys = Object.keys(window).filter(k =>
-      k.includes('mobx') || k.includes('MobX') || k.includes('MOBX') || k.includes('observable')
-    );
+    const mobxKeys = Object.keys(window).filter(k => k.includes('mobx') || k.includes('MobX') || k.includes('MOBX') || k.includes('observable'));
     for (const k of mobxKeys) {
       try {
         const store = window[k];
         if (store && store.$mobx) {
-          result.stores.push({
-            source: 'window.' + k,
-            type: 'mobx-observable',
-            keys: Object.keys(store).slice(0, 100),
-          });
+          result.stores.push({ source: 'window.' + k, type: 'mobx-observable', keys: Object.keys(store).slice(0, 100) });
           result.found = true;
         }
       } catch(e) {}
     }
   } catch(e) {}
 
-  // ── Recoil ────────────────────────────────────────────────────────────────────
+  // Recoil
   try {
     const recoilStore = window.__recoilStore__ || window.__RECOIL_STORE__;
-    if (recoilStore) {
-      result.stores.push({ source: 'window.__recoilStore__', type: 'recoil', detected: true });
-      result.found = true;
-    }
+    if (recoilStore) { result.stores.push({ source: 'window.__recoilStore__', type: 'recoil', detected: true }); result.found = true; }
   } catch(e) {}
 
   result.storeCount = result.stores.length;
@@ -564,7 +466,7 @@ const PRESET_I18N = /* js */ `
 (function extractI18n() {
   const result = { found: false, provider: null, locales: [], currentLocale: null, keys: {}, namespaces: [] };
 
-  // ── react-i18next / i18next ───────────────────────────────────────────────────
+  // react-i18next / i18next
   try {
     const i18n = window.i18next || window.i18n || window.__i18next__;
     if (i18n && i18n.store) {
@@ -581,22 +483,19 @@ const PRESET_I18N = /* js */ `
           function flattenKeys(obj, prefix) {
             for (const [k, v] of Object.entries(obj || {})) {
               const fullKey = prefix ? prefix + '.' + k : k;
-              if (typeof v === 'object' && !Array.isArray(v)) {
-                flattenKeys(v, fullKey);
-              } else {
-                result.keys[ns].push(fullKey);
-              }
+              if (typeof v === 'object' && !Array.isArray(v)) flattenKeys(v, fullKey);
+              else result.keys[ns].push(fullKey);
             }
           }
           flattenKeys(translations, '');
           result.keys[ns] = [...new Set(result.keys[ns])].slice(0, 2000);
-          break; // Only first language to avoid duplication
+          break;
         }
       }
     }
   } catch(e) {}
 
-  // ── vue-i18n ──────────────────────────────────────────────────────────────────
+  // vue-i18n
   if (!result.found) {
     try {
       const vi18n = window.__VUE_I18N__ || window.vueI18n;
@@ -623,21 +522,17 @@ const PRESET_I18N = /* js */ `
     } catch(e) {}
   }
 
-  // ── FormatJS / react-intl ─────────────────────────────────────────────────────
+  // FormatJS / react-intl
   if (!result.found) {
     try {
       const intl = window.__REACT_INTL_CONTEXT__ || window.ReactIntl;
-      if (intl) {
-        result.found = true;
-        result.provider = 'react-intl';
-        result.detected = true;
-      }
+      if (intl) { result.found = true; result.provider = 'react-intl'; result.detected = true; }
     } catch(e) {}
   }
 
-  // ── Generic: window.translations / window.i18n (plain object) ─────────────────
+  // Generic window.translations etc.
   if (!result.found) {
-    const candidates = ['translations', '__translations__', 'TRANSLATIONS', 'i18n', 'locale', 'messages', 'localeData'];
+    const candidates = ['translations','__translations__','TRANSLATIONS','i18n','locale','messages','localeData'];
     for (const key of candidates) {
       try {
         const val = window[key];
@@ -672,27 +567,14 @@ export const PRESETS = {
 
 export type PresetKey = keyof typeof PRESETS
 
+// Shortened to single-sentence summaries — long descriptions bloat the schema
+// envelope and push session-start token usage past the 20,400 context limit.
 const PRESET_DESCRIPTIONS: Record<PresetKey, string> = {
-  extract_routes:
-    'Scan for React Router v5/v6, Next.js Pages/App Router, Vue Router, TanStack Router, ' +
-    'Angular Router, Remix, SvelteKit route tables. Returns all known client-side routes ' +
-    'including hidden ones not linked from the UI.',
-  extract_feature_flags:
-    'Detect LaunchDarkly, Statsig, Unleash, GrowthBook, Split.io, Optimizely, and custom ' +
-    'window.flags objects. Returns all feature flag keys and their current values. ' +
-    'Reveals features built but not yet exposed in the UI.',
-  extract_graphql:
-    'If Apollo Client, Relay, or URQL is loaded, extract the cache state, all executed ' +
-    'query names, entity types, type policies, and possible types. ' +
-    'Also scans for __schema on window. Returns the full API shape the app uses.',
-  extract_redux:
-    'Dump the complete state tree from Redux, Zustand, Jotai, MobX, or Recoil stores. ' +
-    'Returns the exact data model the app uses, including all keys and current values. ' +
-    'Functions are represented as [Function] strings.',
-  extract_i18n:
-    'Dump i18n translation keys from i18next, vue-i18n, react-intl, or custom window.translations. ' +
-    'Returns all translation key names (not values) per namespace. ' +
-    'Key names act as a complete feature catalog — every feature the app has text for.',
+  extract_routes: 'Extract client-side route table (React Router, Next.js, Vue Router, TanStack, Angular, SvelteKit).',
+  extract_feature_flags: 'Extract all feature flag keys and values (LaunchDarkly, Statsig, Unleash, GrowthBook, Split, Optimizely, custom).',
+  extract_graphql: 'Extract Apollo/Relay/URQL cache state, query names, and entity types.',
+  extract_redux: 'Dump state tree from Redux, Zustand, Jotai, MobX, or Recoil stores.',
+  extract_i18n: 'Dump i18n translation key names from i18next, vue-i18n, react-intl, or custom window.translations.',
 }
 
 // ── Helper: run a preset script ───────────────────────────────────────────────
@@ -757,12 +639,11 @@ async function runPreset(
 
 export const eval_preset = defineXcTool({
   name: 'eval_preset',
+  // Compact description — no dynamic .map().join() that concatenates all 5
+  // preset descriptions inline. That was adding ~800 chars to the schema envelope.
   description:
-    'Run a named knowledge-extraction preset against the page. ' +
-    'Available presets:\n' +
-    Object.entries(PRESET_DESCRIPTIONS)
-      .map(([k, v]) => `  • ${k}: ${v}`)
-      .join('\n'),
+    'Run a named knowledge-extraction preset. ' +
+    'Presets: extract_routes, extract_feature_flags, extract_graphql, extract_redux, extract_i18n.',
   input: z.object({
     page: pageParam,
     preset: z
