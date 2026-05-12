@@ -31,8 +31,13 @@
  * Crawl modes:
  *   Normal:     maxPages cap enforced (default 50). Stops at cap.
  *   Exhaustive: exhaustive=true. Crawls until queue is empty (all reachable
- *               same-origin URLs visited). Safety limit via hardAbortAfter
+ *               same-root-domain URLs visited). Safety limit via hardAbortAfter
  *               (default 2000) prevents infinite loops on huge sites.
+ *
+ * Link scope (subdomain crawling):
+ *   The BFS follows any link whose root domain (eTLD+1) matches the seed URL.
+ *   Starting at www.twilio.com will follow console.twilio.com, help.twilio.com,
+ *   api.twilio.com, etc. External domains (stripe.com, google.com) are excluded.
  *
  * Auth modes:
  *   none:        Default. Auth-wall pages are recorded as login nodes but
@@ -103,6 +108,55 @@ const MAX_PAGES_SENTINEL = 999_999
  */
 const SAVE_INTERVAL = 10
 
+/**
+ * Two-part TLD suffixes that need a three-label root domain.
+ * e.g. foo.co.uk -> rootDomain = foo.co.uk (not co.uk).
+ */
+const TWO_PART_TLDS = new Set([
+  'co.uk', 'co.in', 'co.jp', 'co.nz', 'co.za', 'co.kr', 'co.id',
+  'com.au', 'com.br', 'com.mx', 'com.ar', 'com.sg', 'com.hk',
+  'org.uk', 'net.au', 'gov.uk', 'ac.uk', 'me.uk',
+])
+
+// ─── Root-domain helpers ──────────────────────────────────────────────────────
+
+/**
+ * Extract the eTLD+1 root domain from a hostname.
+ *
+ * Examples:
+ *   www.twilio.com       -> twilio.com
+ *   console.twilio.com   -> twilio.com
+ *   twilio.com           -> twilio.com
+ *   foo.bar.co.uk        -> bar.co.uk
+ *   localhost            -> localhost
+ */
+function getRootDomain(hostname: string): string {
+  const parts = hostname.toLowerCase().split('.')
+  if (parts.length <= 2) return hostname.toLowerCase()
+  // Check for known two-part TLD (e.g. co.uk)
+  const lastTwo = parts.slice(-2).join('.')
+  if (TWO_PART_TLDS.has(lastTwo)) {
+    // Need 3 labels: foo.co.uk
+    return parts.slice(-3).join('.')
+  }
+  // Default: last 2 labels
+  return parts.slice(-2).join('.')
+}
+
+/**
+ * Returns true if href belongs to the same root domain.
+ * Accepts exact match (twilio.com) and any subdomain (*.twilio.com).
+ * Rejects cross-root URLs (stripe.com, google.com).
+ */
+function isSameSite(href: string, rootDomain: string): boolean {
+  try {
+    const hostname = new URL(href).hostname.toLowerCase()
+    return hostname === rootDomain || hostname.endsWith(`.${rootDomain}`)
+  } catch {
+    return false
+  }
+}
+
 // ─── Auth session state ───────────────────────────────────────────────────────────
 
 interface AuthSession {
@@ -131,6 +185,14 @@ interface AuthSession {
 interface BfsState {
   sessionId: string
   rootUrl: string
+  /**
+   * eTLD+1 root domain extracted from rootUrl.
+   * Used as the BFS link scope: any URL whose hostname equals rootDomain
+   * or ends with .rootDomain is eligible for crawling.
+   * e.g. seed=www.twilio.com -> rootDomain=twilio.com, so
+   * console.twilio.com, help.twilio.com, api.twilio.com are all followed.
+   */
+  rootDomain: string
   visited: Set<string>
   /** O(1) queue membership check (replaces queue.includes). */
   queued: Set<string>
@@ -395,6 +457,10 @@ async function attemptAutoLogin(
  * Process a single URL in the BFS loop.
  * Extracted so it can be called both from the main loop and from resume.
  * Returns 'auth-wall' if crawl should be paused for authentication.
+ *
+ * @param rootDomain - eTLD+1 root domain of the seed URL (e.g. 'twilio.com').
+ *   Any link whose hostname equals rootDomain or ends with .rootDomain is
+ *   queued. This enables cross-subdomain crawling within the same root.
  */
 async function processBfsPage(
   url: string,
@@ -413,7 +479,7 @@ async function processBfsPage(
     waitForNavigation?: (id: number, opts?: Record<string, unknown>) => Promise<void>
     closePage: (id: number) => Promise<void>
   },
-  origin: string,
+  rootDomain: string,
 ): Promise<'ok' | 'auth-wall'> {
   const depth = state.depthMap.get(url) ?? 0
   let pageId: number | undefined
@@ -550,6 +616,10 @@ async function processBfsPage(
 
     const pageRole = inferPageRole(title, h1, hasPassword, hasPricingUrl, hasDocsUrl)
     const compactApiCalls = apiCallsObserved.map(compactUrl)
+
+    // Hostname of the page being processed (for crossSubdomain edge metadata)
+    let pageHostname = ''
+    try { pageHostname = new URL(url).hostname.toLowerCase() } catch {}
 
     // ── Add main page node ─────────────────────────────────────────────────
     const { nodeId: mainNodeId } = await addNode(
@@ -756,22 +826,30 @@ async function processBfsPage(
       } catch {}
     }
 
-    // ── Phase 7: getPageLinks ──────────────────────────────────────────────────
-    // In exhaustive mode we don't restrict by depth — every link found is queued.
-    // In normal mode we honour maxDepth.
+    // ── Phase 7: getPageLinks — subdomain-aware BFS link discovery ─────────
+    // Accepts any URL whose root domain matches the seed (*.twilio.com for
+    // a seed of www.twilio.com). External domains are rejected.
     const shouldFollowLinks = state.exhaustive || depth < state.maxDepth
     if (shouldFollowLinks) {
       const links = await browser.getPageLinks(pageId)
       const sameSiteLinks = links
         .map(l => l.href)
-        .filter(h => { try { return new URL(h).origin === origin } catch { return false } })
+        .filter(h => isSameSite(h, rootDomain))
         .filter((h, i, arr) => arr.indexOf(h) === i)
 
       for (const link of sameSiteLinks) {
+        // Annotate cross-subdomain hops in the graph for richer analysis.
+        let linkHostname = ''
+        try { linkHostname = new URL(link).hostname.toLowerCase() } catch {}
+        const crossSubdomain = linkHostname !== pageHostname
+
         const { nodeId: linkedNodeId } = await addNode(
           link, 'page', { url: link, depth: depth + 1, status: 'queued' }, sessionId,
         )
-        await addEdge(mainNodeId, linkedNodeId, 'navigates_to', { fromDepth: depth }, sessionId)
+        await addEdge(mainNodeId, linkedNodeId, 'navigates_to', {
+          fromDepth: depth,
+          crossSubdomain: crossSubdomain || undefined,
+        }, sessionId)
 
         if (!state.visited.has(link) && !state.queued.has(link)) {
           state.queued.add(link)
@@ -804,7 +882,7 @@ async function processBfsPage(
 async function runBfsLoop(
   state: BfsState,
   browser: Parameters<typeof processBfsPage>[2],
-  origin: string,
+  rootDomain: string,
   response: { progress?: (msg: string) => void },
 ): Promise<void> {
   while (
@@ -825,7 +903,7 @@ async function runBfsLoop(
       )
     }
 
-    const result = await processBfsPage(url, state, browser, origin)
+    const result = await processBfsPage(url, state, browser, rootDomain)
 
     if (result === 'auth-wall') {
       if (state.authMode === 'credentials' && state.auth.credentials) {
@@ -865,26 +943,12 @@ async function runBfsLoop(
 
 export const map_site_start = defineTool({
   name: 'map_site_start',
-  // BUG 6 FIX: Use .join('\n') not .join(' ').
-  // .join(' ') collapsed the array into one ~900-char line with embedded
-  // double-quote chars (authMode=none/ask/credentials). At high context
-  // utilisation the tokenizer split the string mid-quote, producing an
-  // unterminated JSON string in the tool schema envelope, which caused the
-  // runtime to emit 'malformed tool call data that could not be repaired'
-  // before any handler ran. Also removed all embedded double-quote chars
-  // from description lines and field .describe() strings — they are a
-  // second tokenizer hazard inside JSON string values.
-  //
-  // BUG A FIX: map_site_start now guards against overwriting a live paused
-  // or running bfsState. Context compaction was truncating the earlier tool
-  // result that contained status=paused, so the model had no evidence a
-  // crawl was in progress and called map_site_start again. The unconditional
-  // bfsState = {...} assignment then destroyed the paused session. Now the
-  // handler returns an explicit error with the session ID and instructs the
-  // model to call map_site_resume. A force=true param allows abandoning a
-  // genuinely stuck session when needed.
   description: [
     'BFS-crawl a website and build a semantic knowledge graph.',
+    '',
+    'LINK SCOPE: crawls across all subdomains of the seed domain.',
+    'Starting at www.twilio.com will follow console.twilio.com,',
+    'help.twilio.com, api.twilio.com, etc. External domains are excluded.',
     '',
     'IMPORTANT: If a crawl is already paused, call map_site_resume instead.',
     'Calling map_site_start while a crawl is paused will be rejected unless',
@@ -893,7 +957,7 @@ export const map_site_start = defineTool({
     'CRAWL MODES:',
     '  Normal (default): respects maxPages cap (default 50).',
     '  Exhaustive (exhaustive=true): crawls until queue empty — all reachable',
-    '  same-origin URLs visited. Safety: hardAbortAfter (default 2000).',
+    '  same-root-domain URLs visited. Safety: hardAbortAfter (default 2000).',
     '',
     'AUTH MODES:',
     "  authMode=none (default): records login pages, no authentication.",
@@ -909,7 +973,7 @@ export const map_site_start = defineTool({
     '  4: getDom(form) — full form/field extraction',
     '  5: searchDom — dialogs, password fields',
     '  6: evaluate — Performance API call detection',
-    '  7: getPageLinks — BFS link discovery',
+    '  7: getPageLinks — BFS link discovery (all subdomains of root domain)',
     '',
     'REQUIRED: url.',
     'OPTIONAL: maxDepth (1-10, default 2), maxPages (default 50),',
@@ -938,7 +1002,6 @@ export const map_site_start = defineTool({
       .describe('Email or username. Required when authMode=credentials.'),
     loginPassword: z.string().optional()
       .describe('Password. Required when authMode=credentials.'),
-    // BUG A FIX: force param — allows explicitly abandoning a paused session.
     force: z.boolean().default(false)
       .describe('Set true to abandon an existing paused or stuck session and start fresh.'),
     session_id: z.string().optional()
@@ -948,10 +1011,6 @@ export const map_site_start = defineTool({
   }),
 
   async handler(args, ctx, response) {
-    // ── BUG A FIX: Guard against overwriting a live paused/running session ──
-    // Context compaction truncates earlier tool results, making the model
-    // unaware a crawl is paused. Without this guard, calling map_site_start
-    // again unconditionally destroyed the paused BFS state.
     if (bfsState && (bfsState.status === 'paused' || bfsState.status === 'running') && !args.force) {
       response.text(JSON.stringify({
         error: 'A crawl session is already active.',
@@ -967,7 +1026,10 @@ export const map_site_start = defineTool({
       return
     }
 
-    const origin = (() => { try { return new URL(args.url).origin } catch { return args.url } })()
+    let seedHostname = ''
+    try { seedHostname = new URL(args.url).hostname } catch {}
+    const rootDomain = getRootDomain(seedHostname)
+
     const sessionId = args.session_id ?? urlToSessionId(args.url)
     const session = await getOrCreateSession(sessionId)
     const mermaidDir = (args.mermaid_direction ?? 'LR') as 'LR' | 'TD'
@@ -984,6 +1046,7 @@ export const map_site_start = defineTool({
     bfsState = {
       sessionId,
       rootUrl: args.url,
+      rootDomain,
       visited: new Set(),
       queued: new Set([args.url]),
       queue: [args.url],
@@ -1022,7 +1085,7 @@ export const map_site_start = defineTool({
     await runBfsLoop(
       bfsState,
       ctx.browser as Parameters<typeof processBfsPage>[2],
-      origin,
+      rootDomain,
       response as { progress?: (msg: string) => void },
     )
 
@@ -1030,6 +1093,7 @@ export const map_site_start = defineTool({
       response.text(JSON.stringify({
         status: 'paused',
         sessionId,
+        rootDomain,
         pagesVisited: bfsState.pagesVisited,
         queuedRemaining: bfsState.queue.length,
         pauseReason: bfsState.pauseReason,
@@ -1060,6 +1124,7 @@ export const map_site_start = defineTool({
     response.text(JSON.stringify({
       status: hardAborted ? 'done_hard_aborted' : 'done',
       sessionId,
+      rootDomain,
       exhaustive: args.exhaustive,
       pagesVisited: bfsState.pagesVisited,
       authStatus: {
@@ -1097,13 +1162,6 @@ export const map_site_resume = defineTool({
     'Takes no arguments.',
   ].join('\n'),
   approvalCategory: 'observation',
-  // BUG B FIX: Use z.object({}) instead of z.object({ _noop: z.string().optional() }).
-  // Some AI SDK runtime versions treat any schema that has a field — even an
-  // optional one — as requiring at least one argument to be present in the
-  // tool call JSON. When the model calls map_site_resume with zero args (the
-  // correct usage) the runtime rejects the call at schema validation before
-  // the handler runs, emitting the malformed tool call data error.
-  // z.object({}) accepts an empty call unconditionally.
   input: z.object({}),
   async handler(_args, ctx, response) {
     if (!bfsState) {
@@ -1119,17 +1177,12 @@ export const map_site_resume = defineTool({
     bfsState.auth.method = 'manual'
     bfsState.status = 'running'
     bfsState.pauseReason = null
-    // BUG C FIX: Reset authWallsSeen after successful manual auth so that
-    // subsequent per-domain auth walls (e.g. console.twilio.com vs twilio.com)
-    // are not silently ignored because the counter hit the 3-wall cap.
     bfsState.auth.authWallsSeen = 0
-
-    const origin = (() => { try { return new URL(bfsState.rootUrl).origin } catch { return bfsState.rootUrl } })()
 
     await runBfsLoop(
       bfsState,
       ctx.browser as Parameters<typeof processBfsPage>[2],
-      origin,
+      bfsState.rootDomain,
       response as { progress?: (msg: string) => void },
     )
 
@@ -1221,16 +1274,12 @@ export const map_site_provide_credentials = defineTool({
     bfsState.auth.credentials = credentials
     bfsState.status = 'running'
     bfsState.pauseReason = null
-    // BUG C FIX: Reset authWallsSeen after successful credential-based auth
-    // for the same reason as in map_site_resume.
     bfsState.auth.authWallsSeen = 0
-
-    const origin = (() => { try { return new URL(bfsState.rootUrl).origin } catch { return bfsState.rootUrl } })()
 
     await runBfsLoop(
       bfsState,
       ctx.browser as Parameters<typeof processBfsPage>[2],
-      origin,
+      bfsState.rootDomain,
       response as { progress?: (msg: string) => void },
     )
 
@@ -1271,7 +1320,6 @@ export const map_site_bfs_status = defineTool({
   name: 'map_site_bfs_status',
   description: 'Get status, auth state, and file paths of an in-progress or completed map_site_start crawl.',
   approvalCategory: 'observation',
-  // BUG B FIX: z.object({}) — same rationale as map_site_resume above.
   input: z.object({}),
   async handler(_args, _ctx, response) {
     if (!bfsState) {
@@ -1287,6 +1335,7 @@ export const map_site_bfs_status = defineTool({
       exhaustive: bfsState.exhaustive,
       sessionId: bfsState.sessionId,
       rootUrl: bfsState.rootUrl,
+      rootDomain: bfsState.rootDomain,
       pagesVisited: bfsState.pagesVisited,
       queued: bfsState.queue.length,
       elapsedMs: Date.now() - bfsState.startedAt,
