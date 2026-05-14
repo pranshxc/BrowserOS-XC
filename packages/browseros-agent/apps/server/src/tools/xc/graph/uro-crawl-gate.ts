@@ -38,7 +38,7 @@
  *   Filtered: ~8,000 integer-ID error pages + ~3,000 locale dupes + ~2,000 blog slugs
  */
 
-import { UroFilter, getSessionUroFilter, VULN_PARAMS } from '../uro-filter'
+import { UroFilter, getSessionUroFilter, VULN_PARAMS } from './uro-filter'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
