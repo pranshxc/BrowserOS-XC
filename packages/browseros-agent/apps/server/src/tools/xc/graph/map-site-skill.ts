@@ -1279,3 +1279,251 @@ export const map_site_resume = defineTool({
     }, null, 2))
   },
 })
+
+// ─── map_site_provide_credentials ─────────────────────────────────────────────────────
+
+export const map_site_provide_credentials = defineTool({
+  name: 'map_site_provide_credentials',
+  description: [
+    'Supply credentials to auto-login and resume a paused crawl.',
+    'Use when a crawl paused at an auth wall and authMode was not "credentials".',
+    'The agent will attempt to fill and submit the login form automatically,',
+    'then resume the BFS from where it left off.',
+  ].join('\n'),
+  approvalCategory: 'observation',
+  input: z.object({
+    email: z.string().describe('Email or username for login'),
+    password: z.string().describe('Password for login'),
+    loginUrl: z.string().optional()
+      .describe('Override the login URL. Defaults to the URL where the auth wall was detected.'),
+  }),
+
+  async handler(args, ctx, response) {
+    if (!bfsState || bfsState.status !== 'paused') {
+      response.text(JSON.stringify({
+        error: 'No paused crawl session found.',
+        hint: 'Start a crawl with map_site_start first.',
+      }))
+      return
+    }
+
+    const loginUrl = args.loginUrl ?? bfsState.auth.loginUrl ?? bfsState.rootUrl
+    const credentials = { loginUrl, email: args.email, password: args.password }
+
+    const loginResult = await attemptAutoLogin(
+      ctx.browser as Parameters<typeof attemptAutoLogin>[0],
+      credentials,
+    )
+
+    if (!loginResult.success) {
+      response.text(JSON.stringify({
+        status: 'login_failed',
+        error: loginResult.error ?? 'Unknown error during auto-login.',
+        hint: 'Try calling map_site_resume after logging in manually in the browser.',
+      }))
+      return
+    }
+
+    if (loginResult.pageId >= 0) {
+      try { await (ctx.browser as any).closePage(loginResult.pageId) } catch {}
+    }
+
+    bfsState.auth.authenticated = true
+    bfsState.auth.method = 'auto'
+    bfsState.auth.authWallsSeen = 0
+    bfsState.auth.credentials = credentials
+    bfsState.status = 'running'
+    bfsState.pauseReason = null
+
+    await runBfsLoop(
+      bfsState,
+      ctx.browser as Parameters<typeof processBfsPage>[2],
+      bfsState.rootDomain,
+      response as { progress?: (msg: string) => void },
+      bfsState.bfsCtx,
+    )
+
+    if (bfsState.status === 'paused') {
+      response.text(JSON.stringify({
+        status: 'paused',
+        sessionId: bfsState.sessionId,
+        pagesVisited: bfsState.pagesVisited,
+        queuedRemaining: bfsState.queue.length,
+        pauseReason: bfsState.pauseReason,
+      }))
+      return
+    }
+
+    bfsState.status = 'done'
+    const [saveResult, summary] = await Promise.all([
+      saveAllFormats(bfsState.sessionId, bfsState.mermaidDir, true),
+      getSessionSummary(bfsState.sessionId),
+    ])
+
+    const uroGateStats = uroCrawlGate.stats(bfsState.bfsCtx)
+
+    response.text(JSON.stringify({
+      status: 'done',
+      sessionId: bfsState.sessionId,
+      pagesVisited: bfsState.pagesVisited,
+      uroGateStats: {
+        kept: uroGateStats.kept,
+        skipped: uroGateStats.skipped,
+        skipReasons: uroGateStats.skipReasons,
+      },
+      graph: {
+        nodes: summary.nodeCount,
+        edges: summary.edgeCount,
+        nodeTypes: summary.nodeTypes,
+      },
+      files: {
+        ndjson: { home: saveResult.homeNdjsonPath, cwd: saveResult.cwdNdjsonPath },
+        json: { home: saveResult.homeJsonPath, cwd: saveResult.cwdJsonPath },
+        mermaid: { home: saveResult.homeMMDPath, cwd: saveResult.cwdMMDPath },
+      },
+    }, null, 2))
+  },
+})
+
+// ─── map_site_bfs_status ──────────────────────────────────────────────────────────────
+
+export const map_site_bfs_status = defineTool({
+  name: 'map_site_bfs_status',
+  description: [
+    'Return the current status of the active BFS crawl without blocking.',
+    'Shows pages visited, queue depth, URO gate stats, auth state, and output file paths.',
+    'Call this at any time while a crawl is running or paused.',
+    'Returns an error if no crawl session exists.',
+  ].join('\n'),
+  approvalCategory: 'observation',
+  input: z.object({}),
+
+  async handler(_args, _ctx, response) {
+    if (!bfsState) {
+      response.text(JSON.stringify({
+        error: 'No active crawl session.',
+        hint: 'Start one with map_site_start.',
+      }))
+      return
+    }
+
+    const uroGateStats = uroCrawlGate.stats(bfsState.bfsCtx)
+    const elapsedMs = Date.now() - bfsState.startedAt
+    const elapsedSec = Math.round(elapsedMs / 1000)
+
+    response.text(JSON.stringify({
+      status: bfsState.status,
+      sessionId: bfsState.sessionId,
+      rootUrl: bfsState.rootUrl,
+      rootDomain: bfsState.rootDomain,
+      exhaustive: bfsState.exhaustive,
+      pagesVisited: bfsState.pagesVisited,
+      queuedRemaining: bfsState.queue.length,
+      visitedTotal: bfsState.visited.size,
+      elapsedSeconds: elapsedSec,
+      pagesPerSecond: elapsedSec > 0 ? Math.round((bfsState.pagesVisited / elapsedSec) * 10) / 10 : 0,
+      pauseReason: bfsState.pauseReason ?? undefined,
+      lastError: bfsState.lastError ?? undefined,
+      authStatus: {
+        mode: bfsState.authMode,
+        authenticated: bfsState.auth.authenticated,
+        loginUrl: bfsState.auth.loginUrl ?? undefined,
+        method: bfsState.auth.method,
+      },
+      uroGateStats: {
+        kept: uroGateStats.kept,
+        skipped: uroGateStats.skipped,
+        skipReasons: uroGateStats.skipReasons,
+      },
+      files: {
+        ndjson: { home: bfsState.homePath, cwd: bfsState.cwdPath },
+        json: { home: bfsState.homeJsonPath, cwd: bfsState.cwdJsonPath },
+        mermaid: { home: bfsState.homeMMDPath, cwd: bfsState.cwdMMDPath },
+      },
+    }, null, 2))
+  },
+})
+
+// ─── map_site_enqueue ─────────────────────────────────────────────────────────────────
+
+export const map_site_enqueue = defineTool({
+  name: 'map_site_enqueue',
+  description: [
+    'Manually inject a URL into the live BFS queue, bypassing URO dedup.',
+    'Use for pentest-specific targets: admin panels, API endpoints, hidden routes,',
+    'or any URL the agent wants to force-visit that the gate would normally skip.',
+    '',
+    'The URL must belong to the same root domain as the active crawl session.',
+    'The URL will be visited at the next available BFS iteration.',
+    '',
+    'Returns an error if no crawl session exists or the URL is off-domain.',
+    'If the crawl is paused, the URL is queued and will be visited on resume.',
+  ].join('\n'),
+  approvalCategory: 'observation',
+  input: z.object({
+    url: z.string().describe('Absolute URL to force-enqueue into the BFS queue'),
+    priority: z.enum(['front', 'back']).default('front')
+      .describe('front: visit next (default, for high-priority targets). back: visit last.'),
+  }),
+
+  async handler(args, _ctx, response) {
+    if (!bfsState) {
+      response.text(JSON.stringify({
+        error: 'No active crawl session.',
+        hint: 'Start one with map_site_start.',
+      }))
+      return
+    }
+
+    // Validate same root domain
+    if (!isSameSite(args.url, bfsState.rootDomain)) {
+      response.text(JSON.stringify({
+        error: `URL is off-domain. Active crawl is scoped to root domain: ${bfsState.rootDomain}`,
+        url: args.url,
+        hint: 'Only URLs within the same root domain can be enqueued.',
+      }))
+      return
+    }
+
+    // Already visited?
+    if (bfsState.visited.has(args.url)) {
+      response.text(JSON.stringify({
+        status: 'already_visited',
+        url: args.url,
+        hint: 'This URL has already been crawled in the current session.',
+      }))
+      return
+    }
+
+    // Already in queue?
+    if (bfsState.queued.has(args.url)) {
+      response.text(JSON.stringify({
+        status: 'already_queued',
+        url: args.url,
+        queuePosition: bfsState.queue.indexOf(args.url),
+        hint: 'This URL is already in the BFS queue.',
+      }))
+      return
+    }
+
+    // Force-enqueue, bypassing URO gate
+    bfsState.queued.add(args.url)
+    if (args.priority === 'front') {
+      bfsState.queue.unshift(args.url)
+    } else {
+      bfsState.queue.push(args.url)
+    }
+    // Inherit depth from referrer if possible; otherwise use max seen depth + 1
+    const inferredDepth = Math.max(...Array.from(bfsState.depthMap.values()), 0)
+    bfsState.depthMap.set(args.url, inferredDepth)
+
+    response.text(JSON.stringify({
+      status: 'enqueued',
+      url: args.url,
+      priority: args.priority,
+      queueDepth: bfsState.queue.length,
+      sessionId: bfsState.sessionId,
+      note: 'URL force-enqueued bypassing URO dedup. It will be visited at the next BFS iteration.',
+    }))
+  },
+})
