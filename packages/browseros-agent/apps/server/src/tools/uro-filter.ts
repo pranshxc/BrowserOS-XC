@@ -14,10 +14,17 @@
  * - Vuln-param URLs are flagged in output so the LLM can prioritise them.
  *
  * Dedup rules applied (in order):
- *  1. Static asset extension blacklist (css, png, jpg, woff2, mp4 …)
- *  2. Content/blog pagination filter — skips /blog/1, /blog/2, /posts/slug-with-many-hyphens
- *  3. Integer-segment pattern dedup — first /user/42 is kept, /user/99 is skipped
- *  4. Query-param dedup — same path+same param keys = skip; new param key = keep
+ *  1. Security override — vuln-param URLs always pass (checked before everything)
+ *  2. Static asset extension blacklist (css, png, jpg, woff2, mp4 …)
+ *  3. Locale normalisation — /en-us/X, /en-gb/X, /ja-jp/X → canonical /X for dedup
+ *  4. Content/blog pagination filter — skips /blog/1, slugs-with-many-hyphens
+ *  5. Integer-segment pattern dedup — first /user/42 kept, /user/99 skipped
+ *  6. Query-param dedup — same path+same param keys = skip; new param key = keep
+ *
+ * Exported helpers:
+ *  - UroFilter class  — instantiate once per crawl session
+ *  - getSessionUroFilter(ctx) — lazy-init helper for shared session instance
+ *  - VULN_PARAMS set  — injectable param names from s0md3v/uro
  */
 
 // ─── Static asset extension blacklist ────────────────────────────────────────
@@ -53,6 +60,12 @@ export const VULN_PARAMS = new Set([
   'disable','enable','make','modify','rename','reset','shell','toggle','adm',
   'cfg','open','img','filename','preview','activity',
 ])
+
+// ─── Locale segment regex ─────────────────────────────────────────────────────
+// Matches IETF BCP 47 style: /en-us/, /en-gb/, /ja-jp/, /pt-br/, /zh-cn/ etc.
+// Also matches ISO 639-1 single-segment: /en/, /fr/, /de/, /es/ etc.
+// Must be at the START of the pathname.
+const RE_LOCALE_PREFIX = /^\/([a-z]{2}(-[a-z]{2})?)(\/?$|\/)/i
 
 // ─── Content patterns (blog/pagination paths to skip) ────────────────────────
 // Matches: /blog/, /posts/, /docs/, /support/, /2024/01/, /pages/3/ etc.
@@ -91,7 +104,13 @@ export class UroFilter {
    * Returns true  → URL is novel, should be crawled.
    * Returns false → URL is redundant, skip it.
    *
-   * Security override: URLs with known-vuln param keys always return true.
+   * Pipeline (in strict order):
+   *  0. Malformed URL → false immediately
+   *  1. Vuln-param security override → always true (before all other filters)
+   *  2. Static asset blacklist → false
+   *  3. Locale normalisation for dedup state (original URL still crawled)
+   *  4. Content/blog pagination filter → false
+   *  5. Integer-segment + param-key dedup
    */
   shouldCrawl(rawUrl: string, keepTrailingSlash = false): boolean {
     const cleanUrl = keepTrailingSlash
@@ -108,20 +127,49 @@ export class UroFilter {
     const path = parsed.pathname
     const params = this._parseParams(parsed.search)
 
-    // ── Security override: always crawl vuln-param URLs ───────────────────────
+    // ── 1. Security override: always crawl vuln-param URLs ───────────────────
+    // This runs BEFORE locale normalization and ALL other filters.
+    // We must never silently drop a potential attack surface.
     if ([...params.keys()].some(k => VULN_PARAMS.has(k))) return true
 
-    // ── Filter 1: static asset extension blacklist ────────────────────────────
+    // ── 2. Static asset extension blacklist ──────────────────────────────────
     if (this._isBlacklisted(path)) return false
 
-    // ── Filter 2: content/blog pagination skip ────────────────────────────────
-    if (!this._passesContentFilter(parsed.origin, path)) return false
+    // ── 3. Locale normalisation ───────────────────────────────────────────────
+    // Compute a canonical URL for dedup purposes. The real URL is still what
+    // gets crawled — normalisation only affects the dedup state key so that
+    // /en-us/pricing and /en-gb/pricing are treated as the same page.
+    const normalizedOrigin = parsed.origin
+    const normalizedPath = this._stripLocale(path)
 
-    // ── Filters 3 & 4: path + param-key deduplication ────────────────────────
-    return this._isNovelUrl(parsed.origin, path, params)
+    // ── 4. Content/blog pagination filter ────────────────────────────────────
+    if (!this._passesContentFilter(normalizedOrigin, normalizedPath)) return false
+
+    // ── 5 & 6. Path + param-key deduplication (on normalised path) ───────────
+    return this._isNovelUrl(normalizedOrigin, normalizedPath, params)
   }
 
-  // ─── Private helpers ───────────────────────────────────────────────────────
+  // ─── Locale helpers ─────────────────────────────────────────────────────────
+
+  /**
+   * Strip the leading locale segment from a pathname.
+   *
+   * Examples:
+   *   /en-us/pricing   → /pricing
+   *   /ja-jp/docs/api  → /docs/api
+   *   /en/about        → /about
+   *   /pricing         → /pricing  (no locale prefix — unchanged)
+   *   /en-us           → /         (locale-only path → root)
+   */
+  private _stripLocale(pathname: string): string {
+    const m = RE_LOCALE_PREFIX.exec(pathname)
+    if (!m) return pathname
+    // m[0] is the full matched prefix, e.g. '/en-us/' or '/en/'
+    const remainder = pathname.slice(m[0].length)
+    return remainder ? '/' + remainder : '/'
+  }
+
+  // ─── Private helpers ─────────────────────────────────────────────────────────
 
   private _parseParams(search: string): Map<string, string> {
     const map = new Map<string, string>()
@@ -302,4 +350,27 @@ export class UroFilter {
     }
     return { totalHosts: this.hostMap.size, totalPaths, totalPatterns }
   }
+}
+
+// ─── Session helper ───────────────────────────────────────────────────────────
+
+/**
+ * Get or lazily create the session-scoped UroFilter.
+ *
+ * Call this from BOTH:
+ *  - snapshot.ts get_page_links handler (already done)
+ *  - xc/graph/uro-crawl-gate.ts BFS enqueue gate (new)
+ *
+ * This guarantees one shared UroFilter instance per crawl session so dedup
+ * state from pages crawled by the BFS engine also blocks links returned by
+ * get_page_links, and vice-versa.
+ *
+ * @param ctx  Any object with an optional `.session` property.
+ */
+export function getSessionUroFilter(
+  ctx: { session?: { uroFilter?: UroFilter } },
+): UroFilter {
+  if (!ctx.session) (ctx as any).session = {}
+  if (!ctx.session!.uroFilter) ctx.session!.uroFilter = new UroFilter()
+  return ctx.session!.uroFilter
 }

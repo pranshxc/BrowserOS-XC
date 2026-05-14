@@ -2,6 +2,7 @@ import { TOOL_LIMITS } from '@browseros/shared/constants/limits'
 import { z } from 'zod'
 import { defineToolWithCategory } from './framework'
 import { writeTempToolOutputFile } from './output-file'
+import { getSessionUroFilter, VULN_PARAMS } from './uro-filter'
 
 const pageParam = z.number().describe('Page ID (from list_pages)')
 const defineObservationTool = defineToolWithCategory('observation')
@@ -175,10 +176,29 @@ export const take_screenshot = defineCaptureTool({
   },
 })
 
+// ─── get_page_links — URO-filtered link extraction ───────────────────────────
+//
+// Uses the session-scoped UroFilter (shared with the BFS crawl engine via
+// getSessionUroFilter) so dedup state from the BFS crawl also suppresses
+// redundant links here, and vice-versa.
+//
+// Output contract:
+//  - links[]            deduplicated, URO-filtered links
+//  - count              number of links returned
+//  - skipped            number of links dropped by URO
+//  - uroStats           current filter state summary for LLM visibility
+//  - isVulnCandidate    true when URL contains an injectable param (⚠️ flag)
+
 export const get_page_links = defineObservationTool({
   name: 'get_page_links',
   description:
-    'Extract all links from the page using the accessibility tree. Returns a deduplicated list of [text](url) entries. More reliable than DOM queries — handles role="link" elements and shadow DOM.',
+    'Extract all links from the page, deduplicated via URO logic to skip ' +
+    'static assets, paginated content (/blog/1, /blog/2), locale variants ' +
+    '(/en-us/X treated same as /en-gb/X), and already-seen param combos. ' +
+    'Security-relevant URLs with injectable params (?redirect=, ?file=, ?id= etc.) ' +
+    'are ALWAYS included and flagged with ⚠️ — never skipped. ' +
+    'URO filter state is shared with the BFS crawl engine so this tool and ' +
+    'map_site_* see the same dedup state within the session.',
   input: z.object({
     page: pageParam,
   }),
@@ -187,22 +207,124 @@ export const get_page_links = defineObservationTool({
       z.object({
         text: z.string(),
         href: z.string(),
+        isVulnCandidate: z.boolean().optional(),
       }),
     ),
     count: z.number(),
+    skipped: z.number(),
+    uroStats: z.object({
+      totalHosts: z.number(),
+      totalPaths: z.number(),
+      totalPatterns: z.number(),
+    }),
   }),
   handler: async (args, ctx, response) => {
-    const links = await ctx.browser.getPageLinks(args.page)
+    // ── 1. Get session-scoped UroFilter (shared with BFS engine) ─────────────
+    const uro = getSessionUroFilter(ctx)
 
-    if (links.length === 0) {
+    // ── 2. Resolve current page URL for relative-href expansion ─────────────
+    let currentPageUrl = ''
+    try {
+      const activePage = await ctx.browser.getActivePage()
+      currentPageUrl = activePage?.url ?? ''
+    } catch { /* non-fatal */ }
+
+    // ── 3. Extract raw links from accessibility tree ─────────────────────────
+    const rawLinks = await ctx.browser.getPageLinks(args.page)
+
+    if (rawLinks.length === 0) {
       response.text('No links found on the page.')
-      response.data({ links: [], count: 0 })
+      response.data({ links: [], count: 0, skipped: 0, uroStats: uro.stats() })
       return
     }
 
-    const lines = links.map((l) => (l.text ? `[${l.text}](${l.href})` : l.href))
+    // ── 4. Apply URO filter pipeline ─────────────────────────────────────────
+    const filtered: Array<{ text: string; href: string; isVulnCandidate?: boolean }> = []
+    let skipped = 0
+
+    for (const link of rawLinks) {
+      const href = link.href ?? ''
+
+      // Drop pseudo-links immediately — no point running URO on these
+      if (
+        !href ||
+        href.startsWith('#') ||
+        href.startsWith('javascript:') ||
+        href.startsWith('mailto:') ||
+        href.startsWith('tel:')
+      ) {
+        skipped++
+        continue
+      }
+
+      // Resolve relative URLs against the current page origin
+      let absoluteHref = href
+      if (!href.startsWith('http://') && !href.startsWith('https://')) {
+        try {
+          absoluteHref = new URL(href, currentPageUrl).href
+        } catch {
+          skipped++
+          continue
+        }
+      }
+
+      // URO decision — includes locale normalisation, blacklist, content,
+      // integer-segment dedup, and param-key dedup in one call
+      if (!uro.shouldCrawl(absoluteHref)) {
+        skipped++
+        continue
+      }
+
+      // Flag URLs with injectable params for pentest prioritisation
+      let isVulnCandidate: boolean | undefined
+      try {
+        const u = new URL(absoluteHref)
+        const hasVuln = [...u.searchParams.keys()].some(k => VULN_PARAMS.has(k))
+        if (hasVuln) isVulnCandidate = true
+      } catch { /* non-fatal */ }
+
+      filtered.push({ text: link.text ?? '', href: absoluteHref, isVulnCandidate })
+    }
+
+    if (filtered.length === 0) {
+      response.text(
+        `No novel links after URO dedup. Skipped ${skipped} redundant URLs.\n` +
+        `URO state: ${uro.stats().totalPaths} paths, ` +
+        `${uro.stats().totalPatterns} int-patterns across ${uro.stats().totalHosts} hosts.`,
+      )
+      response.data({ links: [], count: 0, skipped, uroStats: uro.stats() })
+      return
+    }
+
+    // ── 5. Surface vuln-param URLs first so LLM sees high-value targets first ─
+    const vulnLinks   = filtered.filter(l => l.isVulnCandidate)
+    const normalLinks = filtered.filter(l => !l.isVulnCandidate)
+    const sorted      = [...vulnLinks, ...normalLinks]
+
+    // ── 6. Format output text ────────────────────────────────────────────────
+    const lines: string[] = []
+    if (vulnLinks.length > 0) {
+      lines.push(
+        `⚠️  ${vulnLinks.length} URL(s) with injectable params — prioritise for testing:`,
+      )
+      for (const l of vulnLinks) {
+        lines.push(`  🎯 ${l.text ? `[${l.text}](${l.href})` : l.href}`)
+      }
+      lines.push('')
+    }
+    for (const l of normalLinks) {
+      lines.push(l.text ? `[${l.text}](${l.href})` : l.href)
+    }
+
+    const stats = uro.stats()
+    lines.push(
+      `\n[URO] Kept: ${filtered.length} | Skipped: ${skipped} | ` +
+      `Hosts: ${stats.totalHosts} | Paths seen: ${stats.totalPaths} | ` +
+      `Int-patterns: ${stats.totalPatterns}`,
+    )
+
     response.text(lines.join('\n'))
-    response.data({ links, count: links.length })
+    response.data({ links: sorted, count: sorted.length, skipped, uroStats: stats })
   },
 })
 
