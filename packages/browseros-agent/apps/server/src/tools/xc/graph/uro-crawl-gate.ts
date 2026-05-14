@@ -10,17 +10,13 @@
  *
  * ## How to wire into the BFS engine
  *
- * In the file that calls `queue.enqueue(url)` or equivalent inside the
- * map_site_start / map_site_resume crawl loop, add:
+ * In map-site-skill.ts, the gate is already wired via processBfsPage.
+ * Every discovered link in Phase 7 now passes through:
  *
- *   import { uroCrawlGate } from './uro-crawl-gate'
- *
- *   // Replace:
- *   queue.enqueue(discoveredUrl)
- *
- *   // With:
- *   if (uroCrawlGate.shouldEnqueue(discoveredUrl, crawlSession)) {
- *     queue.enqueue(discoveredUrl)
+ *   if (uroCrawlGate.shouldEnqueue(link, bfsCtx, url)) {
+ *     state.queued.add(link)
+ *     state.queue.push(link)
+ *     state.depthMap.set(link, depth + 1)
  *   }
  *
  * The gate shares the same UroFilter instance as snapshot.ts/get_page_links
@@ -80,7 +76,7 @@ export interface UroCrawlStats {
  */
 export class UroCrawlGate {
   /**
-   * Call this INSTEAD of `queue.enqueue(url)` in the BFS crawl loop.
+   * Call this INSTEAD of directly pushing to the BFS queue.
    *
    * Returns true  → URL should be enqueued for crawling.
    * Returns false → URL is redundant; skip it silently.
@@ -259,28 +255,28 @@ export class UroCrawlGate {
 
 export const uroCrawlGate = new UroCrawlGate()
 
-// ─── Wiring guide (inline for co-location with the code) ─────────────────────
-//
-// In your BFS crawl loop (map_site_start / map_site_resume handler):
-//
-//   import { uroCrawlGate } from '../graph/uro-crawl-gate'
-//
-//   // At crawl start — reset state so each new crawl gets fresh dedup:
-//   uroCrawlGate.reset(ctx)
-//
-//   // Replace every direct enqueue call:
-//   //   Before: queue.enqueue(url)
-//   //   After:
-//   const currentBase = page.url()  // or however you get the current page URL
-//   if (uroCrawlGate.shouldEnqueue(discoveredUrl, ctx, currentBase)) {
-//     queue.enqueue(discoveredUrl)
-//   }
-//
-//   // In map_site_bfs_status response:
-//   return {
-//     status: 'running' | 'done' | ...,
-//     pagesVisited,
-//     pagesQueued: queue.size,
-//     uroStats: uroCrawlGate.stats(ctx),  // ← add this line
-//     // ... rest of your status fields
-//   }
+/**
+ * Factory helper used in map-site-skill.ts to create a gate scoped to a
+ * lightweight ctx-like object that only holds session state.
+ * This avoids needing to pass the full ctx object down into processBfsPage.
+ *
+ * Usage in map_site_start handler (patch 3 — gate init):
+ *
+ *   const bfsCtx: CrawlSessionCtx = { session: {} }
+ *   uroCrawlGate.reset(bfsCtx)
+ *
+ * Usage in processBfsPage Phase 7 (patch 4 — enqueue wrapping):
+ *
+ *   if (uroCrawlGate.shouldEnqueue(link, bfsCtx, url)) {
+ *     state.queued.add(link)
+ *     state.queue.push(link)
+ *     state.depthMap.set(link, depth + 1)
+ *   }
+ *
+ * Usage in map_site_start completion summary (patch 5 — stats output):
+ *
+ *   uroGateStats: uroCrawlGate.stats(bfsCtx)
+ */
+export function createUroEnqueueGate(): UroCrawlGate {
+  return new UroCrawlGate()
+}
