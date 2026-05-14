@@ -50,6 +50,46 @@ const SKIP_EXTENSIONS = new Set([
   'manifest', 'appcache',
 ])
 
+// ─── Security-relevant injectable parameter names ──────────────────────────
+/**
+ * Query parameter names that commonly indicate injectable or security-relevant
+ * surfaces (LFI, SSRF, IDOR, SQLi, redirect, template injection, etc.).
+ *
+ * URLs containing ANY of these params bypass URO dedup and are ALWAYS kept,
+ * even if a structurally similar URL was already seen.
+ *
+ * Exported so uro-crawl-gate.ts and snapshot.ts can use the same list.
+ */
+export const VULN_PARAMS = new Set([
+  // Path/file inclusion (LFI / RFI)
+  'file', 'path', 'page', 'template', 'view', 'doc', 'document', 'include',
+  'load', 'read', 'pg', 'filepath', 'filename', 'name', 'dir', 'folder',
+  // SSRF / open-redirect
+  'url', 'uri', 'src', 'source', 'dest', 'destination', 'redirect',
+  'redirect_uri', 'redirect_url', 'return', 'return_url', 'returnto',
+  'next', 'goto', 'target', 'link', 'ref', 'referer', 'referrer',
+  'callback', 'host', 'domain', 'origin', 'forward', 'proxy',
+  // IDOR / object reference
+  'id', 'uid', 'user_id', 'userid', 'account', 'account_id', 'accountid',
+  'customer', 'customer_id', 'order', 'order_id', 'invoice', 'invoice_id',
+  'item', 'item_id', 'pid', 'oid', 'cid', 'rid', 'tid', 'bid', 'nid',
+  // SQL injection canaries
+  'q', 'query', 'search', 's', 'keyword', 'filter', 'sort', 'order',
+  'orderby', 'order_by', 'group', 'groupby', 'limit', 'offset', 'where',
+  'category', 'cat', 'type', 'tag', 'status', 'state',
+  // Command injection / eval
+  'cmd', 'exec', 'command', 'execute', 'run', 'shell',
+  'code', 'eval', 'expression',
+  // Template / SSTI
+  'format', 'layout', 'theme', 'style', 'lang', 'locale', 'language',
+  // Auth / token
+  'token', 'api_key', 'apikey', 'key', 'secret', 'password', 'pass',
+  'hash', 'signature', 'sig', 'jwt', 'auth', 'session', 'sessionid',
+  // Upload / content-type
+  'upload', 'import', 'export', 'content', 'data', 'body', 'payload',
+  'action', 'method', 'op', 'operation',
+])
+
 // ─── Numeric / hash segment pattern ────────────────────────────────────────
 
 /**
@@ -134,6 +174,10 @@ export class UroFilter {
   /**
    * Decide whether a URL should be crawled.
    *
+   * Security override: if the URL contains any VULN_PARAMS key, it is
+   * ALWAYS accepted regardless of dedup state — every injectable surface
+   * must be individually tested.
+   *
    * @param rawUrl - Absolute URL string.
    * @returns `true` if the URL should be crawled (new security surface),
    *          `false` if it is structurally redundant.
@@ -147,7 +191,12 @@ export class UroFilter {
       return true  // unparseable — let BFS handle it
     }
 
-    // ── 2. Skip static asset extensions ──────────────────────────────────
+    // ── 2. Security override: vuln params are never deduplicated ──────────
+    const searchParams = parsed.searchParams
+    const hasVulnParam = Array.from(searchParams.keys()).some(k => VULN_PARAMS.has(k))
+    if (hasVulnParam) return true
+
+    // ── 3. Skip static asset extensions ──────────────────────────────────
     const pathname = parsed.pathname
     const lastDot = pathname.lastIndexOf('.')
     if (lastDot !== -1) {
@@ -155,11 +204,10 @@ export class UroFilter {
       if (SKIP_EXTENSIONS.has(ext)) return false
     }
 
-    // ── 3. Normalise path to structural template ──────────────────────────
+    // ── 4. Normalise path to structural template ──────────────────────────
     const template = pathToTemplate(pathname)
 
-    // ── 4. No-param URLs: one representative per path template ────────────
-    const searchParams = parsed.searchParams
+    // ── 5. No-param URLs: one representative per path template ────────────
     const hasParams = Array.from(searchParams.keys()).length > 0
 
     if (!hasParams) {
@@ -168,7 +216,7 @@ export class UroFilter {
       return true
     }
 
-    // ── 5. Parameterised URL: (template + sorted-param-key-set) fingerprint ─
+    // ── 6. Parameterised URL: (template + sorted-param-key-set) fingerprint ─
     const paramFp = paramKeyFingerprint(searchParams)
     const fullFp = `${template}::${paramFp}`
 
@@ -178,7 +226,7 @@ export class UroFilter {
       return false
     }
 
-    // ── 6. Accept: record state ───────────────────────────────────────────
+    // ── 7. Accept: record state ───────────────────────────────────────────
     this.seenTemplateParamFingerprints.add(fullFp)
     this.seenPathTemplates.add(template)
 
@@ -192,6 +240,13 @@ export class UroFilter {
     }
 
     return true
+  }
+
+  /**
+   * Alias for accept() — use whichever reads more naturally at the call site.
+   */
+  shouldCrawl(rawUrl: string): boolean {
+    return this.accept(rawUrl)
   }
 
   /**
@@ -220,6 +275,39 @@ export class UroFilter {
     this.seenParamValues.clear()
     this.seenPathTemplates.clear()
   }
+}
+
+// ─── Session-scoped singleton accessor ─────────────────────────────────────
+
+/**
+ * Minimal interface for any object that can hold a session-scoped UroFilter.
+ * Both the BFS crawl context and the snapshot tool ctx satisfy this.
+ */
+export interface UroFilterSession {
+  session?: {
+    uroFilter?: UroFilter
+    [key: string]: unknown
+  }
+}
+
+/**
+ * Get (or lazily create) the session-scoped UroFilter singleton.
+ *
+ * Sharing one instance across get_page_links (snapshot.ts) AND the BFS
+ * enqueue gate (uro-crawl-gate.ts) ensures dedup state is unified:
+ * a URL seen via get_page_links is also blocked in the BFS queue, and
+ * vice versa.
+ *
+ * Usage:
+ *   const uro = getSessionUroFilter(ctx)
+ *   if (uro.accept(url)) { ... }
+ */
+export function getSessionUroFilter(ctx: UroFilterSession): UroFilter {
+  ctx.session ??= {}
+  if (!ctx.session.uroFilter) {
+    ctx.session.uroFilter = new UroFilter()
+  }
+  return ctx.session.uroFilter
 }
 
 /**
