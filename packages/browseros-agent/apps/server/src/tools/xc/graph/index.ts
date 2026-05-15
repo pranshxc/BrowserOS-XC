@@ -2,6 +2,23 @@
 
 // ─── Browser wrapper ───────────────────────────────────────────────────────────
 export { adaptBrowser, BrowserAdapter } from './browser-adapter'
+export type {
+  NewPageOptions,
+  GetDomOptions,
+  SearchDomOptions,
+  SearchDomResult,
+  WaitForNavigationOptions,
+  EvaluateResult,
+  Phase1Result,
+  RouteResult,
+  FormResult,
+  FormFieldResult,
+  OverlayResult,
+  OverlayTriggerResult,
+  ServiceWorkerResult,
+  WebWorkerResult,
+  PageLink,
+} from './browser-context'
 export type { CrawlErrorCode, CrawlErrorSeverity } from './crawl-error'
 // ─── Structured error handling ────────────────────────────────────────────────
 export {
