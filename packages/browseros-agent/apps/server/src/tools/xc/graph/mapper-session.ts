@@ -418,3 +418,34 @@ export async function listCheckpoints(): Promise<string[]> {
   const cwd = await readDir(cwdDir)
   return [...new Set([...home, ...cwd])]
 }
+
+/**
+ * Try to resume the most recently modified mapper session from a checkpoint.
+ *
+ * Scans all checkpoint files, picks the one with the newest lastActionAt,
+ * and attempts to restore it. Returns null if no checkpoints exist or
+ * restoration fails.
+ *
+ * This is the primary crash-recovery entry point — call it at startup
+ * after a crash to pick up where the crawl left off.
+ */
+export async function tryResumeLastSession(): Promise<MapperSession | null> {
+  const checkpointIds = await listCheckpoints()
+  if (checkpointIds.length === 0) return null
+
+  // Load all checkpoints to find the most recent one
+  let newestCheckpoint: MapperSessionCheckpoint | null = null
+  let newestId = ''
+
+  for (const id of checkpointIds) {
+    const cp = await loadMapperCheckpoint(id)
+    if (cp && (!newestCheckpoint || cp.lastActionAt > newestCheckpoint.lastActionAt)) {
+      newestCheckpoint = cp
+      newestId = id
+    }
+  }
+
+  if (!newestCheckpoint) return null
+
+  return resumeMapperSession(newestId)
+}
