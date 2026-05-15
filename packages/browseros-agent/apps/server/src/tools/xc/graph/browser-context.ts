@@ -38,12 +38,10 @@ export interface DomAttribute {
 }
 
 export interface DomSearchResultItem {
-  backendNodeId: number
+  tag: string
   nodeId: number
-  nodeName: string
-  localName: string
-  nodeType: number
-  attributes?: DomAttribute[]
+  backendNodeId: number
+  attributes: Record<string, string>
 }
 
 export interface SearchDomResult {
