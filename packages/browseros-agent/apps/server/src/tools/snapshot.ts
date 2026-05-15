@@ -2,7 +2,7 @@ import { TOOL_LIMITS } from '@browseros/shared/constants/limits'
 import { z } from 'zod'
 import { defineToolWithCategory } from './framework'
 import { writeTempToolOutputFile } from './output-file'
-import { getSessionUroFilter, VULN_PARAMS } from './uro-filter'
+import { getSessionUroFilter, VULN_PARAMS, UroFilter } from './xc/graph/uro-filter'
 
 const pageParam = z.number().describe('Page ID (from list_pages)')
 const defineObservationTool = defineToolWithCategory('observation')
@@ -220,7 +220,7 @@ export const get_page_links = defineObservationTool({
   }),
   handler: async (args, ctx, response) => {
     // ── 1. Get session-scoped UroFilter (shared with BFS engine) ─────────────
-    const uro = getSessionUroFilter(ctx)
+    const uro = getSessionUroFilter(ctx as { session?: { uroFilter?: UroFilter; uroCrawlStats?: unknown } })
 
     // ── 2. Resolve current page URL for relative-href expansion ─────────────
     let currentPageUrl = ''
@@ -289,8 +289,8 @@ export const get_page_links = defineObservationTool({
     if (filtered.length === 0) {
       response.text(
         `No novel links after URO dedup. Skipped ${skipped} redundant URLs.\n` +
-        `URO state: ${uro.stats().totalPaths} paths, ` +
-        `${uro.stats().totalPatterns} int-patterns across ${uro.stats().totalHosts} hosts.`,
+        `URO state: ${uro.stats().totalTemplates} templates, ` +
+        `${uro.stats().totalFingerprints} param-key groups across ${uro.stats().totalHosts} hosts.`,
       )
       response.data({ links: [], count: 0, skipped, uroStats: uro.stats() })
       return
@@ -319,8 +319,8 @@ export const get_page_links = defineObservationTool({
     const stats = uro.stats()
     lines.push(
       `\n[URO] Kept: ${filtered.length} | Skipped: ${skipped} | ` +
-      `Hosts: ${stats.totalHosts} | Paths seen: ${stats.totalPaths} | ` +
-      `Int-patterns: ${stats.totalPatterns}`,
+      `Hosts: ${stats.totalHosts} | Templates seen: ${stats.totalTemplates} | ` +
+      `Param-key groups: ${stats.totalFingerprints}`,
     )
 
     response.text(lines.join('\n'))

@@ -1,21 +1,22 @@
 /**
  * uro-crawl-gate.ts
  *
- * BFS enqueue gate — integrates UroFilter into the map_site_* crawl engine.
+ * BFS enqueue gate — integrates UroFilter into the XC Intelligence Mapper.
  *
  * This is the MOST CRITICAL integration point. The BFS crawler discovers URLs
  * internally (by parsing each page's HTML/accessibility tree) and enqueues them
  * before get_page_links is ever called. Without this gate, URO only runs on
  * links the LLM manually requests — the BFS queue still explodes.
  *
- * ## How to wire into the BFS engine
+ * ## How to wire into the XC tools
  *
- * In map-site-skill.ts, Phase 7 (link discovery), wrap every enqueue:
+ * The XC tools (xc-bootstrap.ts, xc-step.ts) use this gate automatically.
+ * In extraction-engine.ts Phase 7, links are extracted with DOM position context
+ * and then filtered through shouldEnqueue() before adding to CrawlQueue:
  *
- *   if (uroCrawlGate.shouldEnqueue(link, bfsCtx, url)) {
- *     state.queued.add(link)
- *     state.queue.push(link)
- *     state.depthMap.set(link, depth + 1)
+ *   if (uroCrawlGate.shouldEnqueue(linkWithContext.href, uroCtx, url)) {
+ *     const item = scoreUrl(linkWithContext.href, signals, graphState, url, 'route', linkWithContext.domPosition)
+ *     addFrontierItems(session, [item])
  *   }
  *
  * The gate shares the same UroFilter instance as snapshot.ts/get_page_links
@@ -162,7 +163,7 @@ export class UroCrawlGate {
    * Returns the current enqueue stats for the session.
    * Merge into map_site_bfs_status responses for LLM visibility.
    */
-  stats(ctx: CrawlSessionCtx): UroCrawlStats & { seenTemplates: number; seenParamGroups: number } {
+  stats(ctx: CrawlSessionCtx): UroCrawlStats & { totalHosts: number; totalTemplates: number; totalFingerprints: number } {
     const crawlStats = this._getOrInitStats(ctx)
     const uroStats = getSessionUroFilter(ctx).stats()
     return { ...crawlStats, ...uroStats }
@@ -243,7 +244,7 @@ export class UroCrawlGate {
 }
 
 // ─── Module-level singleton ────────────────────────────────────────────────
-// Import this singleton from map-site-skill.ts.
+// Import this singleton from XC tools (xc-bootstrap.ts, xc-step.ts).
 
 export const uroCrawlGate = new UroCrawlGate()
 
@@ -251,18 +252,17 @@ export const uroCrawlGate = new UroCrawlGate()
  * Factory helper — creates a gate scoped to a lightweight ctx object.
  * Use when you don't want to pass the full server ctx into the BFS engine.
  *
- * Usage in map_site_start:
+ * Usage in xc_bootstrap:
  *   const bfsCtx: CrawlSessionCtx = { session: {} }
  *   uroCrawlGate.reset(bfsCtx)
  *
- * Usage in processBfsPage Phase 7:
- *   if (uroCrawlGate.shouldEnqueue(link, bfsCtx, url)) {
- *     state.queued.add(link)
- *     state.queue.push(link)
- *     state.depthMap.set(link, depth + 1)
+ * Usage in extraction-engine Phase 7 (wrapped in xc_bootstrap/xc_step):
+ *   if (uroCrawlGate.shouldEnqueue(linkWithContext.href, bfsCtx, url)) {
+ *     const item = scoreUrl(linkWithContext.href, signals, graphState, url, 'route', linkWithContext.domPosition)
+ *     addFrontierItems(session, [item])
  *   }
  *
- * Usage in map_site_start completion summary:
+ * Usage in completion summary:
  *   uroGateStats: uroCrawlGate.stats(bfsCtx)
  */
 export function createUroEnqueueGate(): UroCrawlGate {

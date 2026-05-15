@@ -42,11 +42,11 @@ type CdpFrameTree = {
 type AXNode = {
   nodeId: string
   ignored?: boolean
-  role?: { type: string; value?: unknown }
-  name?: { type: string; value?: unknown }
-  description?: { type: string; value?: unknown }
-  value?: { type: string; value?: unknown }
-  properties?: Array<{ name: string; value: { type: string; value?: unknown } }>
+  role?: { type: string; value?: string | number | boolean }
+  name?: { type: string; value?: string | number | boolean }
+  description?: { type: string; value?: string | number | boolean }
+  value?: { type: string; value?: string | number | boolean }
+  properties?: Array<{ name: string; value: { type: string; value?: string | number | boolean } }>
   childIds?: string[]
   backendDOMNodeId?: number
 }

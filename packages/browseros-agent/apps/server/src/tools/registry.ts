@@ -89,12 +89,10 @@ import {
   graph_add_workflow,
 } from './xc/graph/graph-tools'
 import {
-  map_site_start,
-  map_site_resume,
-  map_site_provide_credentials,
-  map_site_bfs_status,
-  map_site_enqueue,
-} from './xc/graph/map-site-skill'
+  xc_bootstrap,
+  xc_step,
+  xc_frontier,
+} from './xc/graph'
 import {
   // Phase 1 — Network Observation
   get_network_requests,
@@ -305,12 +303,10 @@ export const registry = createRegistry([
   graph_add_api,
   graph_add_workflow,
 
-  // Site mapping — BFS crawler (5)
-  map_site_start,
-  map_site_resume,
-  map_site_provide_credentials,
-  map_site_bfs_status,
-  map_site_enqueue,
+  // Site mapping — LLM-driven intelligence mapper (3)
+  xc_bootstrap,
+  xc_step,
+  xc_frontier,
 
   // Phase 1 — Network Observation (4)
   get_network_requests,

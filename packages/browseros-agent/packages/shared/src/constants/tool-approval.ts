@@ -6,6 +6,12 @@ export const TOOL_APPROVAL_CATEGORY_IDS = [
   'scripts',
   'data-modification',
   'assistant',
+  'read',
+  'filesystem_write',
+  'workers',
+  'performance',
+  'network',
+  'js-engine',
 ] as const
 
 export type ToolApprovalCategoryId = (typeof TOOL_APPROVAL_CATEGORY_IDS)[number]
@@ -57,5 +63,35 @@ export const TOOL_APPROVAL_CATEGORIES: readonly ToolApprovalCategory[] = [
     id: 'assistant',
     name: 'Assistant Actions',
     description: 'BrowserOS helper and suggestion tools.',
+  },
+  {
+    id: 'read',
+    name: 'Read Operations',
+    description: 'Read files, graphs, and session data from disk.',
+  },
+  {
+    id: 'filesystem_write',
+    name: 'Filesystem Write',
+    description: 'Write and export files, graphs, and session data to disk.',
+  },
+  {
+    id: 'workers',
+    name: 'Worker Inspection',
+    description: 'Inspect service workers and web workers.',
+  },
+  {
+    id: 'performance',
+    name: 'Performance Tracing',
+    description: 'Collect and analyze performance metrics.',
+  },
+  {
+    id: 'network',
+    name: 'Network Interception',
+    description: 'Intercept, mock, and replay network requests.',
+  },
+  {
+    id: 'js-engine',
+    name: 'JavaScript Engine',
+    description: 'Runtime and script engine management.',
   },
 ] as const

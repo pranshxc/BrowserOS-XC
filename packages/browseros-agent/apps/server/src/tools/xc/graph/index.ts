@@ -70,6 +70,10 @@ export { startMapping, xc_bootstrap } from './xc-bootstrap'
 export { xc_frontier } from './xc-frontier'
 export { xc_step } from './xc-step'
 
+// ─── Automated crawl loop ─────────────────────
+export { CrawlLoop } from './crawl-loop'
+export type { CrawlLoopOptions, VisitFn, VisitResult } from './crawl-loop'
+
 // ─── Supporting modules (not exported as tools, used by xc_step internally) ────
 // extraction-engine, page-signals, issue-detector, heuristic-scorer,
 // mapper-session, post-interaction-capture, eval-presets-extra

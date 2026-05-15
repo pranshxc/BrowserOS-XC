@@ -4,6 +4,18 @@ import { z } from 'zod'
 
 const EDGE_TYPES: [EdgeType, ...EdgeType[]] = [
   'navigates_to',
+  'contains',
+  'submits_to',
+  'triggers',
+  'validates_via',
+  'redirects_to',
+  'authenticates_with',
+  'auth_gate',
+  'reveals',
+  'opens_dialog',
+  'client_route_to',
+  'depends_on_state',
+  'background_sync',
   'uses_flag',
   'calls_api',
   'reads_state',
@@ -21,12 +33,12 @@ export const graph_add_edge = defineTool({
     'Does NOT return the full graph.',
     'REQUIRED: from (string node ID), to (string node ID). OPTIONAL: type (default: navigates_to), meta (object), session_id.',
   ].join(' '),
-  approvalCategory: 'filesystem_write',
+  approvalCategory: 'data-modification',
   input: z.object({
     from: z.string().describe('Source node ID (returned by graph_add_node)'),
     to: z.string().describe('Target node ID (returned by graph_add_node)'),
     type: z.enum(EDGE_TYPES).default('navigates_to').describe(
-      'Edge type: navigates_to | uses_flag | calls_api | reads_state | renders | related | generic. Default: navigates_to',
+      'Edge type: navigates_to | contains | submits_to | triggers | validates_via | redirects_to | authenticates_with | auth_gate | reveals | opens_dialog | client_route_to | depends_on_state | background_sync | uses_flag | calls_api | reads_state | renders | related | generic. Default: navigates_to',
     ),
     meta: z
       .record(z.unknown())

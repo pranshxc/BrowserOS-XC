@@ -82,6 +82,12 @@ export type EdgeType =
   | 'redirects_to'       // page → page (HTTP 30x or JS redirect)
   | 'authenticates_with' // page → api_call (login flow)
   | 'auth_gate'          // page → auth_gate
+  // ── Intelligence mapper edges ──
+  | 'reveals'            // action/page reveals hidden capability
+  | 'opens_dialog'       // action opens modal/drawer/popup
+  | 'client_route_to'    // SPA client-side navigation (not <a href>)
+  | 'depends_on_state'   // node requires specific app state
+  | 'background_sync'    // service worker / web worker background sync
   // ── Legacy edges (preserved) ──
   | 'uses_flag'
   | 'calls_api'
