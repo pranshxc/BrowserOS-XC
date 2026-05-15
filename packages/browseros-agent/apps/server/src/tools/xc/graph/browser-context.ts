@@ -8,6 +8,10 @@
 
 // ─── NewPage options ───────────────────
 
+export interface PageLink {
+  href: string
+}
+
 export interface NewPageOptions {
   hidden?: boolean
   background?: boolean
