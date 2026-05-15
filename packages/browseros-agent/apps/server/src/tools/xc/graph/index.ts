@@ -59,6 +59,7 @@ export {
   loadMapperCheckpoint,
   resumeMapperSession,
   saveMapperCheckpoint,
+  tryResumeLastSession,
 } from './mapper-session'
 export type { StartMappingOptions } from './xc-bootstrap'
 // ─── LLM-driven intelligence mapper (replaces map_site_start) ──────────────────
